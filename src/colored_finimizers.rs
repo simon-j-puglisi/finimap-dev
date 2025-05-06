@@ -136,7 +136,7 @@ pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, fin
         let first_finimizer = n_finimizers_in_segment*t;
         let end_finimizer = min(n_finimizers_in_segment*(t+1), n_finimizers); // One past end
         input_segments.push((first_finimizer, end_finimizer));
-        todo!(); // The line below is wrong because cumulative finimizer_lengths includes the minimizer length zeros
+        todo!(); // The line below is wrong because cumulative finimizer_lengths includes the finimizer length zeros
         let concat_slice_len = cumulative_finimizer_lengths[end_finimizer] - cumulative_finimizer_lengths[first_finimizer];
         let (a,b) = tail.split_at_mut(min(concat_slice_len, tail.len()));
         output_segments.push(a);
