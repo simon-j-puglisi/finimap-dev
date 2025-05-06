@@ -36,7 +36,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let dbs = &input_stream.dbs;
 
         let index = StreamingIndex::new(sbwt, lcs);
-        let mut finimizer_lengths: Vec<AtomicU8> = (0..sbwt.n_sets()).map(|_| AtomicU8::new(0)).collect();
+        let finimizer_lengths: Vec<AtomicU8> = (0..sbwt.n_sets()).map(|_| AtomicU8::new(255)).collect();
 
         while let Some(seq) = input_stream.stream_next() {
             let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
