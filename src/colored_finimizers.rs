@@ -117,14 +117,17 @@ pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, fin
 
     // Index i has the sum of finimizer_lengths[0..i)
     let mut cumulative_finimizer_lengths = vec![0_usize; finimizer_lengths.len() + 1]; 
+    let mut n_finimizers = 0_usize;
     for i in 0..finimizer_lengths.len() {
         cumulative_finimizer_lengths[i+1] = cumulative_finimizer_lengths[i] + finimizer_lengths[i] as usize; 
+        if finimizer_lengths[i] > 0 {
+            n_finimizers += 1;
+        }
     }
 
     let mut concat = vec![0_u8; *cumulative_finimizer_lengths.last().unwrap()];
 
     // Split into mutable segments, one for each thread
-    let n_finimizers = finimizer_lengths.len();
     let mut output_segments: Vec<&mut[u8]> = Vec::new();
     let mut input_segments: Vec<(usize,usize)> = Vec::new(); // (Rank of first finimizer, rank of one past end)
     let n_finimizers_in_segment = n_finimizers.div_ceil(n_threads);
