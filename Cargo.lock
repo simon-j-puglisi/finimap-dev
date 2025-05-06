@@ -141,28 +141,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "build_finimizer_matrix"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bitvec",
- "byteorder",
- "clap",
- "crossbeam 0.8.4",
- "env_logger 0.10.2",
- "indicatif",
- "jseqio",
- "log",
- "rand 0.8.5",
- "rand_distr",
- "sbwt",
- "serde",
- "serde_json",
- "simple-sds-sbwt",
- "statrs",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -501,6 +479,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb618d2a87b18c6b527f8c7555d66155542bf2eca8364d21976f58faef3674d5"
 dependencies = [
  "quick-error",
+]
+
+[[package]]
+name = "finimizer_matrix"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bitvec",
+ "byteorder",
+ "clap",
+ "crossbeam 0.8.4",
+ "env_logger 0.10.2",
+ "indicatif",
+ "jseqio",
+ "log",
+ "rand 0.8.5",
+ "rand_distr",
+ "sbwt",
+ "serde",
+ "serde_json",
+ "simple-sds-sbwt",
+ "statrs",
 ]
 
 [[package]]
