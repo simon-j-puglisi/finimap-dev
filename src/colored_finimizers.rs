@@ -38,28 +38,33 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt.n_sets()).map(|_| AtomicU8::new(0)).collect();
 
-        while let Some(seq) = input_stream.stream_next() {
-            let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
-            for kmer_end in k..seq.len() { // Exclusive end
-                if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
-                    continue;
-                }
-
-                // The finimizer is the shortest unique suffix, with ties broken by colex
-                let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
-                for i in (kmer_end - k)..kmer_end {
-                    if let Some((len, range)) = sus[i].clone() {
-                        best = min(best, (len, range.start));
+        //while let Some(seq) = input_stream.stream_next() {
+        dbs.iter().enumerate().par_bridge().for_each(|(db_idx, db)| {
+            eprintln!("Processing file {}/{}", db_idx + 1, dbs.len());
+            for rec in db.iter() {
+                let seq = rec.seq;
+                let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
+                for kmer_end in k..seq.len() { // Exclusive end
+                    if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
+                        continue;
                     }
-                }
 
-                if best == (usize::MAX, usize::MAX){
-                    panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
-                }
+                    // The finimizer is the shortest unique suffix, with ties broken by colex
+                    let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
+                    for i in (kmer_end - k)..kmer_end {
+                        if let Some((len, range)) = sus[i].clone() {
+                            best = min(best, (len, range.start));
+                        }
+                    }
 
-                finimizer_lengths[best.1].store(best.0 as u8, std::sync::atomic::Ordering::Relaxed);
+                    if best == (usize::MAX, usize::MAX){
+                        panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
+                    }
+
+                    finimizer_lengths[best.1].store(best.0 as u8, std::sync::atomic::Ordering::Relaxed);
+                }
             }
-        }
+        });
         finimizer_lengths
     });
 
