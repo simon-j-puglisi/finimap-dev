@@ -31,7 +31,10 @@ pub enum Subcommands {
         k: usize,
 
         #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
-        n_threads: usize
+        n_threads: usize,
+
+        #[arg(help = "Memory in gigabytes", short = 'm', long = "mem-gb", default_value = "4")]
+        mem_gb: usize
     },
 }
 
@@ -43,9 +46,9 @@ fn main() {
 
     let args = Cli::parse();
     match args.command {
-        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads } => {
+        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb } => {
             let input_paths: Vec<PathBuf> = BufReader::new(File::open(input_fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
-            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, &temp_dir);
+            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir);
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
     } 

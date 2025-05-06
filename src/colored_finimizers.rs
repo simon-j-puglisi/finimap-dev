@@ -240,7 +240,7 @@ fn mark_all_kmers_of_seq(bv: Arc<Mutex<BitVec>>, num_colors: usize, color: usize
 impl ColoredFinimizers {
 
     #[allow(clippy::type_complexity)]
-    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, temp_dir: &Path) -> Self {
+    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, mem_gb: usize, temp_dir: &Path) -> Self {
 
         log::info!("Loading {} sequence files (colors) into memory", filenames.len());
         let input_stream = InputStream::new(filenames);
@@ -255,6 +255,7 @@ impl ColoredFinimizers {
             .algorithm(BitPackedKmerSorting::new()
                 .dedup_batches(true)
                 .temp_dir(temp_dir)
+                .mem_gb(mem_gb)
         );
         let (sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
