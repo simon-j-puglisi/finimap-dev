@@ -221,6 +221,22 @@ impl ColoredFinimizers {
         let (sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
+        let finimizer_lengths = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
+        let mut n_finimizers = 0_usize;
+        let mut total_length = 0_usize;
+
+        for x in finimizer_lengths {
+            if x > 0 {
+                n_finimizers += 1;
+                total_length += x;
+            }
+        }
+
+        eprintln!("Number of finimizers = {}", n_finimizers);
+        eprintln!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+
+        /*
+
         let sbwt_len = sbwt.n_sets();
         let streaming_index_owned = StreamingIndex::new(&sbwt, &lcs);
         let streaming_index = &streaming_index_owned; // Pass by reference into the scope
@@ -281,6 +297,9 @@ impl ColoredFinimizers {
         let colex_to_color_set_id: Vec<usize> = (0..sbwt_len).collect(); // Identity mapping
 
         ColoredFinimizers{kmers: sbwt, lcs, distinct_color_sets: color_sets, empty_set: BitVec::new(), colex_to_color_set_id, n_colors: filenames.len()}
+        */
+
+        todo!();
     }
 }
 
