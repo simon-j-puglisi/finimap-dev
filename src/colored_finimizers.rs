@@ -24,23 +24,28 @@ fn has_dna_alphabet(seq: &[u8]) -> bool {
 }
 
 
-// Returns a vec v of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
-// v[i] is the length of the finimizer that is a suffix of k-mer i 
-pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> Vec<u8> {
+// Returns (v, bitmap), where:
+// v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
+// v[i] is the length of the finimizer that is a suffix of k-mer i.
+// bitmap is the concatenation of the bitmap representation of all finimizers in colex order.
+pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> (Vec<u8>, BitVec) {
 
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
 
-    let finimizer_lengths = thread_pool.install(|| {
+    let (finimizer_lengths, interleaved_bitmap) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
         let mut input_stream = InputStream::new(filenames); // Read the data into memory again
         let dbs = &input_stream.dbs;
+        let sbwt_len = sbwt.n_sets();
+        let n_colors = dbs.len();
 
         let index = StreamingIndex::new(sbwt, lcs);
-        let finimizer_lengths: Vec<AtomicU8> = (0..sbwt.n_sets()).map(|_| AtomicU8::new(0)).collect();
+        let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        //while let Some(seq) = input_stream.stream_next() {
-        dbs.iter().enumerate().par_bridge().for_each(|(db_idx, db)| {
+
+        let per_color_bitmaps: Vec<BitVec> = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
             eprintln!("Processing file {}/{}", db_idx + 1, dbs.len());
+            let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
             for rec in db.iter() {
                 let seq = rec.seq;
                 let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
@@ -62,18 +67,45 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                     }
 
                     finimizer_lengths[best.1].store(best.0 as u8, std::sync::atomic::Ordering::Relaxed);
+                    this_color_finimizer_marks.set(best.1, true);
                 }
             }
-        });
-        finimizer_lengths
+            this_color_finimizer_marks
+        }).collect();
+
+        // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
+        let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
+
+        // Figure out how many finimizers have and and their average length
+        let mut n_finimizers = 0_usize;
+        let mut total_length = 0_usize;
+
+        for &x in finimizer_lengths.iter() {
+            if x > 0 {
+                n_finimizers += 1;
+                total_length += x as usize;
+            }
+        }
+
+        eprintln!("Number of finimizers = {}", n_finimizers);
+        eprintln!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+
+        println!("Interleaving individual per-color marks");
+        let mut interleaved_bitmap = bitvec![usize, Lsb0; 0; n_colors*n_finimizers];
+        let mut finimizer_idx = 0_usize;
+        for colex in 0..sbwt_len {
+            if finimizer_lengths[colex] > 0 { // This position is a finimizer
+                for color in 0..n_colors {
+                    interleaved_bitmap.set(n_colors*finimizer_idx + color, per_color_bitmaps[color][colex]); 
+                }
+                finimizer_idx += 1;
+            }
+        }
+        (finimizer_lengths, interleaved_bitmap)
     });
 
-    // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
-    let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
+    (finimizer_lengths, interleaved_bitmap)
 
-    finimizer_lengths
-
-    //std::thread::scope(|scope| {
 }
 
 #[derive(Debug)]
@@ -260,19 +292,7 @@ impl ColoredFinimizers {
         let (sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
-        let finimizer_lengths = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
-        let mut n_finimizers = 0_usize;
-        let mut total_length = 0_usize;
-
-        for x in finimizer_lengths {
-            if x > 0 {
-                n_finimizers += 1;
-                total_length += x as usize;
-            }
-        }
-
-        eprintln!("Number of finimizers = {}", n_finimizers);
-        eprintln!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
 
         /*
 
