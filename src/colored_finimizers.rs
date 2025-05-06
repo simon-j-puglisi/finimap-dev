@@ -7,7 +7,7 @@ use bitvec::prelude::*;
 use simple_sds_sbwt::{self, raw_vector::AccessRaw};
 
 #[derive(Debug)]
-pub struct ColoredKmers {
+pub struct ColoredFinimizers {
     kmers: sbwt::SbwtIndex<sbwt::SubsetMatrix>,
     lcs: sbwt::LcsArray,
     distinct_color_sets: BitVec, // Concatenation of distinct color sets
@@ -16,7 +16,7 @@ pub struct ColoredKmers {
     n_colors: usize,
 }
 
-impl ColoredKmers {
+impl ColoredFinimizers {
 
     pub fn n_colors(&self) -> usize {
         self.n_colors
@@ -86,7 +86,7 @@ impl ColoredKmers {
         let distinct_color_sets: BitVec = bincode::deserialize_from(&mut input).unwrap();
         let colex_to_color_set_id: Vec<usize> = bincode::deserialize_from(&mut input).unwrap(); // Todo: u64 instead of usize
 
-        ColoredKmers{kmers, lcs, colex_to_color_set_id, n_colors: n_colors as usize, distinct_color_sets, empty_set: bitvec![0; n_colors as usize]}
+        ColoredFinimizers {kmers, lcs, colex_to_color_set_id, n_colors: n_colors as usize, distinct_color_sets, empty_set: bitvec![0; n_colors as usize]}
     }
 }
 
@@ -167,7 +167,7 @@ fn mark_all_kmers_of_seq(bv: Arc<Mutex<BitVec>>, num_colors: usize, color: usize
     }
 } 
 
-impl ColoredKmers {
+impl ColoredFinimizers {
 
     #[allow(clippy::type_complexity)]
     pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, temp_dir: &Path) -> Self {
@@ -248,7 +248,7 @@ impl ColoredKmers {
 
         let colex_to_color_set_id: Vec<usize> = (0..sbwt_len).collect(); // Identity mapping
 
-        ColoredKmers{kmers: sbwt, lcs, distinct_color_sets: color_sets, empty_set: BitVec::new(), colex_to_color_set_id, n_colors: filenames.len()}
+        ColoredFinimizers{kmers: sbwt, lcs, distinct_color_sets: color_sets, empty_set: BitVec::new(), colex_to_color_set_id, n_colors: filenames.len()}
     }
 }
 

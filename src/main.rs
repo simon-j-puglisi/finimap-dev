@@ -3,9 +3,10 @@
 use std::{cmp::max, fs::File, io::{BufRead, BufReader, BufWriter}, ops::Sub, path::PathBuf};
 use bitvec::prelude::*;
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
-use colored_kmers::ColoredKmers;
+mod colored_finimizers;
 
-mod colored_kmers;
+use colored_finimizers::ColoredFinimizers;
+
 #[derive(Parser)]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
@@ -34,7 +35,6 @@ pub enum Subcommands {
     },
 }
 
-
 fn main() {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info")
@@ -45,7 +45,7 @@ fn main() {
     match args.command {
         Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads } => {
             let input_paths: Vec<PathBuf> = BufReader::new(File::open(input_fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
-            let index = ColoredKmers::new(input_paths.as_slice(), k, n_threads, &temp_dir);
+            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, &temp_dir);
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
     } 
