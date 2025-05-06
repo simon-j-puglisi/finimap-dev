@@ -121,12 +121,15 @@ pub fn get_finimizer_strings(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimiz
     let mut concat = vec![0_u8; *cumulative_finimizer_lengths.last().unwrap()];
 
     // Split into mutable segments, one for each thread
-    // TODO: need to split by how many finimizers, not by how much concatenation
+    let n_finimizers = finimizer_lengths.len();
     let mut output_segments: Vec<&mut[u8]> = Vec::new();
-    let segment_len = concat.len().div_ceil(n_threads);
+    let n_finimizers_in_segment = n_finimizers.div_ceil(n_threads);
     let mut tail = concat.as_mut_slice();
-    for _ in 0..n_threads {
-        let (a,b) = tail.split_at_mut(min(segment_len, tail.len()));
+    for t in 0..n_threads {
+        let first_finimizer = n_finimizers_in_segment*t;
+        let end_finimizer = min(n_finimizers_in_segment*(t+1), n_finimizers); // One past end
+        let concat_slice_len = cumulative_finimizer_lengths[end_finimizer] - cumulative_finimizer_lengths[first_finimizer];
+        let (a,b) = tail.split_at_mut(min(concat_slice_len, tail.len()));
         output_segments.push(a);
         tail = b;
     }
