@@ -6,6 +6,22 @@ use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, Streaming
 use bitvec::prelude::*;
 use simple_sds_sbwt::{self, raw_vector::AccessRaw};
 
+// This bit vector of length 256 marks the ascii values of these characters: acgtACGT
+const IS_DNA: BitArray<[u32; 8]> = bitarr![const u32, Lsb0; 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+
+pub(crate) fn is_dna_char(c: u8) -> bool {
+    IS_DNA[c as usize]
+}
+
+fn has_dna_alphabet(seq: &[u8]) -> bool {
+    for &c in seq {
+        if !is_dna_char(c) {
+            return false;
+        }
+    }
+    true
+}
+
 // Returns a vec v of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i 
 pub fn identify_finimizers<P: AsRef<Path>>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> Vec<usize> {
@@ -17,8 +33,11 @@ pub fn identify_finimizers<P: AsRef<Path>>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMa
     while let Some(seq) = input_stream.stream_next() {
         let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
         for kmer_end in k..seq.len() { // Exclusive end
-            // The finimizer is the shortest unique suffix, with ties broken by colex
+            if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
+                continue;
+            }
 
+            // The finimizer is the shortest unique suffix, with ties broken by colex
             let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
             for i in (kmer_end - k)..kmer_end {
                 if let Some((len, range)) = sus[i].clone() {
