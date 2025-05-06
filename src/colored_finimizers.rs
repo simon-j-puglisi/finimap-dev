@@ -1,10 +1,42 @@
-use std::{io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::{cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
 use clap::builder::styling::Color;
 use crossbeam::channel::{Receiver, RecvError, Sender};
 use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, StreamingIndex, SubsetMatrix, SubsetSeq};
 use bitvec::prelude::*;
 use simple_sds_sbwt::{self, raw_vector::AccessRaw};
+
+// Returns a vec v of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
+// v[i] is the length of the finimizer that is a suffix of k-mer i 
+pub fn identify_finimizers<P: AsRef<Path>>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> Vec<usize> {
+    log::info!("Reading input sequences into memory");
+    let mut input_stream = InputStream::new(filenames); // Read the data into memory again
+    let index = StreamingIndex::new(sbwt, lcs);
+
+    let mut finimizer_lengths: Vec<usize> = vec![0; sbwt.n_sets()]; 
+    while let Some(seq) = input_stream.stream_next() {
+        let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
+        for kmer_end in k..seq.len() { // Exclusive end
+            // The finimizer is the shortest unique suffix, with ties broken by colex
+
+            let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
+            for i in (kmer_end - k)..kmer_end {
+                if let Some((len, range)) = sus[i].clone() {
+                    best = min(best, (len, range.start));
+                }
+            }
+
+            if best == (usize::MAX, usize::MAX){
+                panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
+            }
+
+            finimizer_lengths[best.1] = best.0;
+        }
+    }
+
+    finimizer_lengths
+
+}
 
 #[derive(Debug)]
 pub struct ColoredFinimizers {
