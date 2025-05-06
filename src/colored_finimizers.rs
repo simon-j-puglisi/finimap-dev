@@ -109,8 +109,11 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 }
 
 // finimizer_lengths should have length |sbwt|, with nonzero entries indicating k-mers who have a finimizer as a suffix
-pub fn get_finimizer_strings(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimizer_lengths: &[u8], n_threads: usize) {
+pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimizer_lengths: &[u8], n_threads: usize) {
     assert_eq!(sbwt.n_sets(), finimizer_lengths.len());
+
+    log::info!("Building select suppport");
+    sbwt.build_select();
 
     // Index i has the sum of finimizer_lengths[0..i)
     let mut cumulative_finimizer_lengths = vec![0_usize; finimizer_lengths.len() + 1]; 
@@ -123,23 +126,48 @@ pub fn get_finimizer_strings(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimiz
     // Split into mutable segments, one for each thread
     let n_finimizers = finimizer_lengths.len();
     let mut output_segments: Vec<&mut[u8]> = Vec::new();
+    let mut input_segments: Vec<(usize,usize)> = Vec::new(); // (Rank of first finimizer, rank of one past end)
     let n_finimizers_in_segment = n_finimizers.div_ceil(n_threads);
     let mut tail = concat.as_mut_slice();
     for t in 0..n_threads {
         let first_finimizer = n_finimizers_in_segment*t;
         let end_finimizer = min(n_finimizers_in_segment*(t+1), n_finimizers); // One past end
+        input_segments.push((first_finimizer, end_finimizer));
         let concat_slice_len = cumulative_finimizer_lengths[end_finimizer] - cumulative_finimizer_lengths[first_finimizer];
         let (a,b) = tail.split_at_mut(min(concat_slice_len, tail.len()));
         output_segments.push(a);
         tail = b;
     }
+    assert!(tail.is_empty()); // Segmentation is complete
 
     // Fill in segments in parallel
-    //output_segments.iter().enumerate().par_bridge().for_each(|(t, out_segment)| {
-        // Threat t processes finimizers with ranks [t*segment_len..t*(segment_len+1)) 
-    //    let first_finimizer_colex = 0; // TODO
-    //    let mut n_processed = 0;
-    //});
+    output_segments.iter_mut().enumerate().par_bridge().for_each(|(t, out_segment)| {
+        let (first, last) = input_segments[t];
+
+        let mut finimizer_rank = 0_usize;
+        let mut output_idx = 0_usize;
+        for colex in 0..sbwt.n_sets() {
+            if finimizer_lengths[colex] > 0 {
+                if finimizer_rank >= first {
+                    // Write the finimizer to the concatenation
+                    let kmer = sbwt.access_kmer(colex);
+                    let finimizer = &kmer[kmer.len() - finimizer_lengths[colex] as usize ..];
+                    for &c in finimizer {
+                        out_segment[output_idx] = c;
+                        output_idx += 1;
+                    }
+                }
+
+                finimizer_rank += 1;
+                if finimizer_rank == last {
+                    assert_eq!(output_idx, out_segment.len()); // Everything written
+                    break;
+                }
+            }
+        }
+    });
+
+    todo!(); // Return.
 }
 
 #[derive(Debug)]
