@@ -108,8 +108,41 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 
 }
 
+// finimizer_lengths should have length |sbwt|, with nonzero entries indicating k-mers who have a finimizer as a suffix
+pub fn get_finimizer_strings(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimizer_lengths: &[u8], n_threads: usize) {
+    assert_eq!(sbwt.n_sets(), finimizer_lengths.len());
+
+    // Index i has the sum of finimizer_lengths[0..i)
+    let mut cumulative_finimizer_lengths = vec![0_usize; finimizer_lengths.len() + 1]; 
+    for i in 0..finimizer_lengths.len() {
+        cumulative_finimizer_lengths[i+1] = cumulative_finimizer_lengths[i] + finimizer_lengths[i] as usize; 
+    }
+
+    let mut concat = vec![0_u8; *cumulative_finimizer_lengths.last().unwrap()];
+
+    // Split into mutable segments, one for each thread
+    let mut output_segments: Vec<&mut[u8]> = Vec::new();
+    let segment_len = concat.len().div_ceil(n_threads);
+    let mut tail = concat.as_mut_slice();
+    for _ in 0..n_threads {
+        let (a,b) = tail.split_at_mut(min(segment_len, tail.len()));
+        output_segments.push(a);
+        tail = b;
+    }
+
+    // Fill in segments in parallel
+    //output_segments.iter().enumerate().par_bridge().for_each(|(t, out_segment)| {
+        // Threat t processes finimizers with ranks [t*segment_len..t*(segment_len+1)) 
+    //    let first_finimizer_colex = 0; // TODO
+    //    let mut n_processed = 0;
+    //});
+}
+
 #[derive(Debug)]
 pub struct ColoredFinimizers {
+    // TODO TODO TODO: the lengths are not indexed by colex, i.e. there are no zeroes in the
+    // vector like there is during construction. 
+
     finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
     finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
     color_sets_bitmap: BitVec, // concatenation of finimizer color set bit maps, in colex order of finimizers 
