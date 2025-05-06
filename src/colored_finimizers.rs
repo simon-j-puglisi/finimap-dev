@@ -110,85 +110,54 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 
 #[derive(Debug)]
 pub struct ColoredFinimizers {
-    kmers: sbwt::SbwtIndex<sbwt::SubsetMatrix>,
-    lcs: sbwt::LcsArray,
-    distinct_color_sets: BitVec, // Concatenation of distinct color sets
-    colex_to_color_set_id: Vec<usize>,
-    empty_set: BitVec, // So that we can return a bitslice to an empty set
-    n_colors: usize,
+    finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
+    finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
+    color_sets_bitmap: BitVec, // concatenation of finimizer color set bit maps, in colex order of finimizers 
+    n_colors: u16,
 }
 
 impl ColoredFinimizers {
 
-    pub fn n_colors(&self) -> usize {
-        self.n_colors
-    }
-
-    pub fn n_kmers(&self) -> usize {
-        self.kmers.n_kmers()
-    }
-
-    pub fn get_k(&self) -> usize {
-        self.kmers.k()
-    }
-
-    pub fn get_color_set(&self, kmer: &[u8]) -> &BitSlice {
-        match self.kmers.search(kmer){
-            Some(range) => {
-                let row = range.start;
-                &self.distinct_color_sets[row*self.n_colors..(row+1)*self.n_colors]
-            }
-            None => &self.empty_set,
-        }
-    }
-
-    pub fn get_all_color_sets(&self, seq: &[u8]) -> Vec<&BitSlice> {
-        let mut sets = Vec::new();
-        let index = sbwt::StreamingIndex::new(&self.kmers, &self.lcs);
-
-        // Start iterating from index k-1 because those before do not correspond to a full k-mer
-        for (match_len, colex_range) in index.matching_statistics(seq)[self.kmers.k()-1 ..].iter() {
-            if *match_len == self.kmers.k() {
-                assert_eq!(colex_range.len(), 1);
-                let id = self.colex_to_color_set_id[colex_range.start];
-                sets.push(self.get_color_set_by_id(id));
-            } else {
-                sets.push(&self.empty_set);
-            }
-        }
-        sets
-    }
-
-    fn get_color_set_by_id(&self, id: usize) -> &BitSlice {
-        &self.distinct_color_sets[id*self.n_colors..(id+1)*self.n_colors]
-    }
 
     pub fn serialize<W: std::io::Write>(&self, mut out: &mut W) {
-        self.kmers.serialize(out).unwrap();
-        self.lcs.serialize(out).unwrap();
+        let n_finimizers = self.finimizer_lengths.len();
+        let finimizer_total_length = self.finimizers_concat.len();
 
+        // Write constants
+        out.write_all(&(n_finimizers as u64).to_le_bytes()).unwrap();
+        out.write_all(&(finimizer_total_length as u64).to_le_bytes()).unwrap();
         out.write_all(&(self.n_colors as u64).to_le_bytes()).unwrap();
-        out.write_all(&(self.distinct_color_sets.len() as u64).to_le_bytes()).unwrap();
 
-        bincode::serialize_into(&mut out, &self.distinct_color_sets).unwrap();
-        bincode::serialize_into(&mut out, &self.colex_to_color_set_id).unwrap();
+        // Write data
+        out.write_all(self.finimizer_lengths.as_slice()).unwrap();
+        out.write_all(self.finimizers_concat.as_slice()).unwrap();
+        bincode::serialize_into(&mut out, &self.color_sets_bitmap).unwrap();
     }
 
     pub fn load<R: std::io::Read>(mut input: &mut R) -> Self {
-        let kmers = SbwtIndex::<SubsetMatrix>::load(input).unwrap();
-        let lcs = sbwt::LcsArray::load(input).unwrap();
-
         let mut buf = [0_u8; 8];
+        input.read_exact(&mut buf).unwrap();
+        let n_finimizers = u64::from_le_bytes(buf);
+
+        input.read_exact(&mut buf).unwrap();
+        let finimizer_total_length = u64::from_le_bytes(buf);
+
         input.read_exact(&mut buf).unwrap();
         let n_colors = u64::from_le_bytes(buf);
 
-        input.read_exact(&mut buf).unwrap();
-        let _ = u64::from_le_bytes(buf); // Total length of distinct color sets
+        let mut finimizer_lengths = vec![0_u8; n_finimizers as usize]; 
+        input.read_exact(&mut finimizer_lengths).unwrap();
 
-        let distinct_color_sets: BitVec = bincode::deserialize_from(&mut input).unwrap();
-        let colex_to_color_set_id: Vec<usize> = bincode::deserialize_from(&mut input).unwrap(); // Todo: u64 instead of usize
+        let mut finimizers_concat = vec![0_u8; finimizer_total_length as usize]; 
+        input.read_exact(&mut finimizers_concat).unwrap();
 
-        ColoredFinimizers {kmers, lcs, colex_to_color_set_id, n_colors: n_colors as usize, distinct_color_sets, empty_set: bitvec![0; n_colors as usize]}
+        let color_sets_bitmap: BitVec = bincode::deserialize_from(&mut input).unwrap();
+
+        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors: n_colors.try_into().unwrap()}
+    }
+
+    pub fn verify() {
+        todo!();
     }
 }
 
