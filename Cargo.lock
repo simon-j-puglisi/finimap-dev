@@ -496,6 +496,7 @@ dependencies = [
  "log",
  "rand 0.8.5",
  "rand_distr",
+ "rayon",
  "sbwt",
  "serde",
  "serde_json",

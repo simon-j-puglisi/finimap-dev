@@ -1,9 +1,10 @@
-use std::{cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::{cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::AtomicU8, Arc, Mutex}};
 
 use clap::builder::styling::Color;
 use crossbeam::channel::{Receiver, RecvError, Sender};
 use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, StreamingIndex, SubsetMatrix, SubsetSeq};
 use bitvec::prelude::*;
+use rayon::prelude::*;
 use simple_sds_sbwt::{self, raw_vector::AccessRaw};
 
 // This bit vector of length 256 marks the ascii values of these characters: acgtACGT
@@ -22,39 +23,52 @@ fn has_dna_alphabet(seq: &[u8]) -> bool {
     true
 }
 
+
 // Returns a vec v of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i 
-pub fn identify_finimizers<P: AsRef<Path>>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> Vec<usize> {
-    log::info!("Reading input sequences into memory");
-    let mut input_stream = InputStream::new(filenames); // Read the data into memory again
-    let index = StreamingIndex::new(sbwt, lcs);
+pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> Vec<u8> {
 
-    let mut finimizer_lengths: Vec<usize> = vec![0; sbwt.n_sets()]; 
-    while let Some(seq) = input_stream.stream_next() {
-        let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
-        for kmer_end in k..seq.len() { // Exclusive end
-            if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
-                continue;
-            }
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
 
-            // The finimizer is the shortest unique suffix, with ties broken by colex
-            let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
-            for i in (kmer_end - k)..kmer_end {
-                if let Some((len, range)) = sus[i].clone() {
-                    best = min(best, (len, range.start));
+    let finimizer_lengths = thread_pool.install(|| {
+        log::info!("Reading input sequences into memory");
+        let mut input_stream = InputStream::new(filenames); // Read the data into memory again
+        let dbs = &input_stream.dbs;
+
+        let index = StreamingIndex::new(sbwt, lcs);
+        let mut finimizer_lengths: Vec<AtomicU8> = (0..sbwt.n_sets()).map(|_| AtomicU8::new(0)).collect();
+
+        while let Some(seq) = input_stream.stream_next() {
+            let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortes unique suffixes
+            for kmer_end in k..seq.len() { // Exclusive end
+                if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
+                    continue;
                 }
-            }
 
-            if best == (usize::MAX, usize::MAX){
-                panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
-            }
+                // The finimizer is the shortest unique suffix, with ties broken by colex
+                let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
+                for i in (kmer_end - k)..kmer_end {
+                    if let Some((len, range)) = sus[i].clone() {
+                        best = min(best, (len, range.start));
+                    }
+                }
 
-            finimizer_lengths[best.1] = best.0;
+                if best == (usize::MAX, usize::MAX){
+                    panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
+                }
+
+                finimizer_lengths[best.1].fetch_min(best.0 as u8, std::sync::atomic::Ordering::Relaxed);
+            }
         }
-    }
+        finimizer_lengths
+    });
+
+    // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
+    let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
 
     finimizer_lengths
 
+    //std::thread::scope(|scope| {
 }
 
 #[derive(Debug)]
@@ -247,7 +261,7 @@ impl ColoredFinimizers {
         for x in finimizer_lengths {
             if x > 0 {
                 n_finimizers += 1;
-                total_length += x;
+                total_length += x as usize;
             }
         }
 
