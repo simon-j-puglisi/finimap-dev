@@ -42,7 +42,6 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-
         let per_color_bitmaps: Vec<BitVec> = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
             eprintln!("Processing file {}/{}", db_idx + 1, dbs.len());
             let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
@@ -181,7 +180,7 @@ pub struct ColoredFinimizers {
     finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
     finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
     color_sets_bitmap: BitVec, // concatenation of finimizer color set bit maps, in colex order of finimizers 
-    n_colors: u16,
+    n_colors: usize,
 }
 
 impl ColoredFinimizers {
@@ -211,7 +210,7 @@ impl ColoredFinimizers {
         let finimizer_total_length = u64::from_le_bytes(buf);
 
         input.read_exact(&mut buf).unwrap();
-        let n_colors = u64::from_le_bytes(buf);
+        let n_colors = u64::from_le_bytes(buf) as usize;
 
         let mut finimizer_lengths = vec![0_u8; n_finimizers as usize]; 
         input.read_exact(&mut finimizer_lengths).unwrap();
@@ -221,7 +220,7 @@ impl ColoredFinimizers {
 
         let color_sets_bitmap: BitVec = bincode::deserialize_from(&mut input).unwrap();
 
-        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors: n_colors.try_into().unwrap()}
+        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors}
     }
 
     pub fn verify() {
@@ -332,71 +331,9 @@ impl ColoredFinimizers {
         let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
         let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
 
-        /*
+        let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
 
-        let sbwt_len = sbwt.n_sets();
-        let streaming_index_owned = StreamingIndex::new(&sbwt, &lcs);
-        let streaming_index = &streaming_index_owned; // Pass by reference into the scope
-
-        log::info!("Reading input sequences back into memory again");
-        let input_stream = InputStream::new(filenames); // Read the data into memory again
-        let dbs = &input_stream.dbs;
-
-        let color_sets = std::thread::scope(|scope| {
-
-            log::info!("Building colors");
-
-            let work_input_queue: (Sender<(usize, &[u8])>, Receiver<(usize, &[u8])>) = crossbeam::channel::unbounded();
-
-            // Push work to the input queue
-            for color in 0..filenames.len() {
-                for rec in dbs[color].iter() {
-                    work_input_queue.0.send((color, rec.seq)).unwrap(); 
-                }
-            }
-            drop(work_input_queue.0); // Close the channel
-
-            // Spawn worker threads
-            let mut worker_handles = Vec::new();
-            let color_sets_lock = Arc::new(Mutex::new(bitvec![0; num_colors*sbwt_len])); // Concatenation of color sets
-            for thread_id in 0..n_threads {
-                let recv_clone = work_input_queue.1.clone();
-                let color_sets_lock_clone = color_sets_lock.clone();
-                let consumer_handle = scope.spawn(move || {
-                    loop {
-                        match recv_clone.recv() {
-                            Ok((color, seq)) => {
-                                mark_all_kmers_of_seq(color_sets_lock_clone.clone(), num_colors, color, seq, k, 100000, streaming_index);
-                            },
-                            Err(RecvError) => {
-                                log::info!("Thread {} finished", thread_id);
-                                break;
-                            }
-                        }
-                    }
-                });
-                worker_handles.push(consumer_handle);
-            }
-
-            // Wait for all workers to finish
-            for handle in worker_handles {
-                handle.join().unwrap();
-            }
-
-            // Since we have joined the workers, there should be only one clone of the
-            // Arc<Mutex> (the one owned by this thread), so we can consume the lock and return the data.
-            Arc::try_unwrap(color_sets_lock).unwrap().into_inner().unwrap()
-
-        }); // End of thread scope 
-
-        // Todo: deduplicate color sets
-
-        let colex_to_color_set_id: Vec<usize> = (0..sbwt_len).collect(); // Identity mapping
-
-        ColoredFinimizers{kmers: sbwt, lcs, distinct_color_sets: color_sets, empty_set: BitVec::new(), colex_to_color_set_id, n_colors: filenames.len()}
-        */
-
-        todo!();
+        ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets_bitmap: interleaved_bitmap, n_colors: num_colors}
     }
 }
 
