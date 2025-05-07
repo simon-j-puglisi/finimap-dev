@@ -219,7 +219,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
             // Check that the marks in ColoredFinimizers match our marks
             for f_idx in 0..n_finimizers {
-                eprintln!("{} {} {}", f_idx, cf.color_sets_bitmap[f_idx * n_colors + color], finimizer_marks[f_idx]);
+                //eprintln!("{} {} {}", f_idx, cf.color_sets_bitmap[f_idx * n_colors + color], finimizer_marks[f_idx]);
                 assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
             }
             log::info!("Color {} OK", path.display());
