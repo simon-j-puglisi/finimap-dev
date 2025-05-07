@@ -84,6 +84,8 @@ fn main() {
             let SbwtIndexVariant::SubsetMatrix(sbwt) = sbwt;
 
             verify_finimizer_shortest_uniqueness(&cf, &sbwt, n_threads);
+
+            log::info!("Verification OK");
         }
     } 
 }
