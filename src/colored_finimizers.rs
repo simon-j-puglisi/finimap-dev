@@ -104,6 +104,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         }
         bar.finish();
         assert_eq!(finimizer_idx, n_finimizers);
+        log::info!("Color matrix finished");
 
         (finimizer_lengths, interleaved_bitmap)
     });
