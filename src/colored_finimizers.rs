@@ -174,9 +174,6 @@ pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, fin
 
 #[derive(Debug)]
 pub struct ColoredFinimizers {
-    // TODO TODO TODO: the lengths here are not indexed by colex, i.e. there are no zeroes in the
-    // vector like there is during construction. When building this struct, need to discard those zeros.
-
     finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
     finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
     color_sets_bitmap: BitVec, // concatenation of finimizer color set bit maps, in colex order of finimizers 
