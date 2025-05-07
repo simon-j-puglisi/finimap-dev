@@ -1,4 +1,4 @@
-use std::{arch::x86_64::_MM_FROUND_TO_NEG_INF, cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::AtomicU8, Arc, Mutex}};
+use std::{arch::x86_64::_MM_FROUND_TO_NEG_INF, cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::{AtomicU64, AtomicU8}, Arc, Mutex}};
 
 use clap::builder::styling::Color;
 use crossbeam::channel::{Receiver, RecvError, Sender};
@@ -28,13 +28,13 @@ fn has_dna_alphabet(seq: &[u8]) -> bool {
 // v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i.
 // bitmap is the concatenation of the bitmap representation of all finimizers in colex order.
-pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> (Vec<u8>, BitVec) {
+pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> (Vec<u8>, BitVec<u64, Lsb0>) {
 
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
 
-    let (finimizer_lengths, interleaved_bitmap) = thread_pool.install(|| {
+    let (finimizer_lengths, finimizer_matrix) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
-        let mut input_stream = InputStream::new(filenames); // Read the data into memory again
+        let input_stream = InputStream::new(filenames); // Read the data into memory again
         let dbs = &input_stream.dbs;
         let sbwt_len = sbwt.n_sets();
         let n_colors = dbs.len();
@@ -90,13 +90,21 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
 
         log::info!("Interleaving individual per-color marks");
-        let mut interleaved_bitmap = bitvec![usize, Lsb0; 0; n_colors*n_finimizers];
+        let total_n_bits = n_colors*n_finimizers;
+        let total_n_words = total_n_bits.div_ceil(64);
+        let finimizer_matrix: Vec<AtomicU64> = (0..total_n_words).map(|_| AtomicU64::new(0)).collect();
+
         let mut finimizer_idx = 0_usize;
         let bar = indicatif::ProgressBar::new(sbwt_len as u64);
         for colex in 0..sbwt_len {
             if finimizer_lengths[colex] > 0 { // This position is a finimizer
                 for color in 0..n_colors {
-                    interleaved_bitmap.set(n_colors*finimizer_idx + color, per_color_bitmaps[color][colex]); 
+                    let bit_idx = finimizer_idx*n_colors + color; // We want to set this bit
+                    let word_idx = bit_idx / 64;
+                    let word_offset = bit_idx % 64;
+                    let bit = per_color_bitmaps[color][colex];
+                    let mask = (1_u64 << word_offset) * bit as u64;
+                    finimizer_matrix[word_idx].fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
                 }
                 finimizer_idx += 1;
             }
@@ -106,10 +114,13 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         assert_eq!(finimizer_idx, n_finimizers);
         log::info!("Color matrix finished");
 
-        (finimizer_lengths, interleaved_bitmap)
+        // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
+        let finimizer_matrix: Vec<u64> = finimizer_matrix.into_iter().map(|x| x.into_inner()).collect();
+
+        (finimizer_lengths, BitVec::<u64, Lsb0>::from_vec(finimizer_matrix))
     });
 
-    (finimizer_lengths, interleaved_bitmap)
+    (finimizer_lengths, finimizer_matrix)
 
 }
 
@@ -182,12 +193,11 @@ pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, fin
 pub struct ColoredFinimizers {
     finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
     finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
-    color_sets_bitmap: BitVec, // concatenation of finimizer color set bit maps, in colex order of finimizers 
+    color_sets_bitmap: BitVec<u64, Lsb0>, // concatenation of finimizer color set bit maps, in colex order of finimizers 
     n_colors: usize,
 }
 
 impl ColoredFinimizers {
-
 
     pub fn serialize<W: std::io::Write>(&self, mut out: &mut W) {
         let n_finimizers = self.finimizer_lengths.len();
@@ -221,7 +231,7 @@ impl ColoredFinimizers {
         let mut finimizers_concat = vec![0_u8; finimizer_total_length as usize]; 
         input.read_exact(&mut finimizers_concat).unwrap();
 
-        let color_sets_bitmap: BitVec = bincode::deserialize_from(&mut input).unwrap();
+        let color_sets_bitmap: BitVec<u64, Lsb0> = bincode::deserialize_from(&mut input).unwrap();
 
         ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors}
     }
