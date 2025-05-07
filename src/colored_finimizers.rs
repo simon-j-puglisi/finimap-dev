@@ -84,10 +84,6 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 
                     let (len, colex, _) = pick_finimizer(&sus[(kmer_end-k) .. kmer_end]);
 
-                    if colex == 46 {
-                        eprintln!("{} {} {}", db_idx, len, colex);
-                    }
-
                     finimizer_lengths[colex].store(len as u8, std::sync::atomic::Ordering::Relaxed);
                     this_color_finimizer_marks.set(colex, true);
                 }
@@ -128,11 +124,6 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                     let bit = per_color_bitmaps[color][colex];
                     let mask = (1_u64 << word_offset) * bit as u64;
 
-                    if color == 0 && finimizer_idx == 5 {
-                        eprintln!("Setting bit to {} (colex {})", bit, colex);
-                        let kmer = sbwt.access_kmer(colex);
-                        eprintln!("{}", String::from_utf8_lossy(&kmer));
-                    }
                     finimizer_matrix[word_idx].fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
                     finimizer_idx += 1;
                 }
@@ -224,7 +215,6 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
             // Check that the marks in ColoredFinimizers match our marks
             for f_idx in 0..n_finimizers {
-                eprintln!("{} {} {} {}", f_idx, String::from_utf8_lossy(finimizers[f_idx]), cf.color_sets_bitmap[f_idx * n_colors + color], finimizer_marks[f_idx]);
                 assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
             }
         }
@@ -468,8 +458,8 @@ impl ColoredFinimizers {
         let (mut sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
-        eprintln!("Building select (TODO REMOVE THIS");
-        sbwt.build_select(); // DEBUG TODO REMOVE THIS
+        //eprintln!("Building select (TODO REMOVE THIS");
+        //sbwt.build_select(); // DEBUG TODO REMOVE THIS
 
         let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
         let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
