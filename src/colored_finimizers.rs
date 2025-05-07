@@ -75,7 +75,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
 
-        // Figure out how many finimizers have and and their average length
+        // Figure out how many finimizers we have and their average length
         let mut n_finimizers = 0_usize;
         let mut total_length = 0_usize;
 
@@ -124,6 +124,34 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
     (finimizer_lengths, finimizer_matrix)
 
 }
+
+pub fn verify_finimizer_shortest_uniqueness(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, n_threads: usize) {
+    // Look up all finimizer strings, verify that their SBWT frequency is 1, and the SBWT frequency of the
+    // longest proper suffix is more than .
+    let n_finimizers = cf.finimizer_lengths.len();
+
+    // Finimizer length cumulative sum up to but not including the array index 
+    let mut f_starts: Vec<usize> = vec![0; n_finimizers + 1];
+    for i in 0..n_finimizers {
+        f_starts[i+1] = f_starts[i] + cf.finimizer_lengths[i] as usize;
+    }
+
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
+
+    thread_pool.install(|| {
+        (0..n_finimizers).par_bridge().for_each(|i| {
+            let s = &cf.finimizers_concat[f_starts[i]..f_starts[i+1]];
+            assert!(sbwt.search(s).unwrap().len() == 1); // Is unique
+            assert!(sbwt.search(&s[1..]).unwrap().len() > 1); // Is not unique
+        });
+    });
+
+}
+
+//pub fn verify<P: AsRef<Path> + Send + Sync>(cf: ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) {
+    // For each color:
+    //   Search all finimizers, check that they have the color
+
 
 // finimizer_lengths should have length |sbwt|, with nonzero entries indicating k-mers who have a finimizer as a suffix
 // Returns the concatenation of finimizers in colex order

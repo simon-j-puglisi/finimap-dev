@@ -5,7 +5,8 @@ use bitvec::prelude::*;
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 mod colored_finimizers;
 
-use colored_finimizers::ColoredFinimizers;
+use colored_finimizers::{verify_finimizer_shortest_uniqueness, ColoredFinimizers};
+use sbwt::{load_sbwt_index_variant, LcsArray, SbwtIndex, SbwtIndexVariant};
 
 #[derive(Parser)]
 #[command(arg_required_else_help = true)]
@@ -36,6 +37,21 @@ pub enum Subcommands {
         #[arg(help = "Memory in gigabytes", short = 'm', long = "mem-gb", default_value = "4")]
         mem_gb: usize
     },
+
+    #[command(arg_required_else_help = true)]
+    Verify {
+        #[arg(help = "A colored finimizers index file", short, long, required = true)]
+        input: PathBuf,
+
+        #[arg(help = "SBWT file", short, long, required = true)]
+        sbwt: PathBuf,
+
+        //#[arg(help = "LCS file", short, long, required = true)]
+        //lcs: PathBuf,
+
+        #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
+        n_threads: usize,
+    },
 }
 
 fn main() {
@@ -59,5 +75,15 @@ fn main() {
             log::info!("Serializing index");
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
+        Subcommands::Verify { input: input_path, sbwt: sbwt_path, n_threads } => {
+            log::info!("Loading ColoredFinimizers");
+            let cf = ColoredFinimizers::load(&mut BufReader::new(File::open(input_path).unwrap()));
+            let sbwt = load_sbwt_index_variant(&mut BufReader::new(File::open(sbwt_path).unwrap())).unwrap();
+            //let lcs = LcsArray::load(&mut BufReader::new(File::open(lcs_path).unwrap())).unwrap();
+
+            let SbwtIndexVariant::SubsetMatrix(sbwt) = sbwt;
+
+            verify_finimizer_shortest_uniqueness(&cf, &sbwt, n_threads);
+        }
     } 
 }
