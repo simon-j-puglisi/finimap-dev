@@ -2,6 +2,7 @@ use std::{arch::x86_64::_MM_FROUND_TO_NEG_INF, cmp::min, io::BufRead, ops::Deref
 
 use clap::builder::styling::Color;
 use crossbeam::channel::{Receiver, RecvError, Sender};
+use jseqio::reader::DynamicFastXReader;
 use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, StreamingIndex, SubsetMatrix, SubsetSeq};
 use bitvec::prelude::*;
 use rayon::prelude::*;
@@ -23,6 +24,30 @@ fn has_dna_alphabet(seq: &[u8]) -> bool {
     true
 }
 
+
+// Returns (len, colex, position in sfs slice)
+#[allow(clippy::manual_flatten)] // More readable
+fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usize, usize, usize){
+    // The finimizer is the shortest unique suffix, with ties broken by colex
+
+    let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
+    let mut best_i: usize = usize::MAX;
+    for (i,x) in sfs_slice.iter().enumerate() {
+        if let Some((len, range)) = x {
+            if (*len, range.start) < best {
+                best = min(best, (*len, range.start));
+                best_i = i;
+            } 
+        }
+    }
+
+    if best == (usize::MAX, usize::MAX){
+        panic!("Finimizer not found for kmer");
+    }
+
+    (best.0, best.1, best_i)
+
+}
 
 // Returns (v, bitmap), where:
 // v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
@@ -53,20 +78,10 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                         continue;
                     }
 
-                    // The finimizer is the shortest unique suffix, with ties broken by colex
-                    let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
-                    for i in (kmer_end - k)..kmer_end {
-                        if let Some((len, range)) = sus[i].clone() {
-                            best = min(best, (len, range.start));
-                        }
-                    }
+                    let (len, colex, _) = pick_finimizer(&sus[(kmer_end-k) .. kmer_end]);
 
-                    if best == (usize::MAX, usize::MAX){
-                        panic!("Finimizer not found for kmer {}", String::from_utf8_lossy(&seq[(kmer_end-k)..kmer_end]));
-                    }
-
-                    finimizer_lengths[best.1].store(best.0 as u8, std::sync::atomic::Ordering::Relaxed);
-                    this_color_finimizer_marks.set(best.1, true);
+                    finimizer_lengths[colex].store(len as u8, std::sync::atomic::Ordering::Relaxed);
+                    this_color_finimizer_marks.set(colex, true);
                 }
             }
             this_color_finimizer_marks
@@ -145,6 +160,35 @@ pub fn verify_finimizer_shortest_uniqueness(cf: &ColoredFinimizers, sbwt: &sbwt:
             assert!(sbwt.search(&s[1..]).unwrap().len() > 1); // Is not unique
         });
     });
+}
+
+pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, n_threads: usize, paths: &[PathBuf]) {
+    let n_finimizers = cf.finimizer_lengths.len();
+    assert!(cf.n_colors == paths.len());
+
+    // Finimizer length cumulative sum up to but not including the array index 
+    let mut f_starts: Vec<usize> = vec![0; n_finimizers + 1];
+    for i in 0..n_finimizers {
+        f_starts[i+1] = f_starts[i] + cf.finimizer_lengths[i] as usize;
+    }
+
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
+    thread_pool.install(|| {
+        for path in paths.iter() {
+            log::info!("Processing color {}", path.display());
+            let mut reader = DynamicFastXReader::from_file(path).unwrap();
+            while let Some(rec) = reader.read_next().unwrap() {
+
+            }
+        }
+        (0..n_finimizers).par_bridge().for_each(|i| {
+            let s = &cf.finimizers_concat[f_starts[i]..f_starts[i+1]];
+            assert!(sbwt.search(s).unwrap().len() == 1); // Is unique
+            assert!(sbwt.search(&s[1..]).unwrap().len() > 1); // Is not unique
+        });
+    });
+
+    todo!();
 
 }
 
