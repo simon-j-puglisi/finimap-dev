@@ -199,6 +199,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
                     }
                     let (len, _, mut end) = pick_finimizer(&sfs[(kmer_end-k)..kmer_end]);
                     end += 1; // Exclusive end
+                    end += kmer_end-k; // Shift to where we are at rec.seq
                     let finimizer = &rec.seq[(end-len) .. end];
 
                     match finimizers.binary_search_by(|test| colex_compare(test, finimizer)) {
