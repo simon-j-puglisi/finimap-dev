@@ -229,8 +229,8 @@ impl ColoredFinimizers {
                 eprintln!("{} {}", String::from_utf8_lossy(a), String::from_utf8_lossy(b));
                 match a.iter().rev().cmp(b.iter().rev()) {
                     std::cmp::Ordering::Equal => panic!("Equal finimizers"),
-                    std::cmp::Ordering::Less => panic!("Non-colex-ordered finimizers"),
-                    std::cmp::Ordering::Greater => {}, // Ok
+                    std::cmp::Ordering::Greater => panic!("Non-colex-ordered finimizers"),
+                    std::cmp::Ordering::Less => {}, // Ok
                 }
             }
             cumul_len += self.finimizer_lengths[i] as usize;
