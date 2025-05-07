@@ -190,7 +190,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
     thread_pool.install(|| {
-        for (color, path) in paths.iter().enumerate() {
+        paths.par_iter().enumerate().for_each(|(color, path)| {
             log::info!("Processing color {}", path.display());
             let is = InputStream::new(&[path]);
             let db = is.dbs.first().unwrap(); // Also has reverse complements
@@ -219,14 +219,11 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
             // Check that the marks in ColoredFinimizers match our marks
             for f_idx in 0..n_finimizers {
-                //eprintln!("{} {} {}", f_idx, cf.color_sets_bitmap[f_idx * n_colors + color], finimizer_marks[f_idx]);
                 assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
             }
             log::info!("Color {} OK", path.display());
-        }
+        });
     });
-
-    todo!(); // Make parallel
 
 }
 
