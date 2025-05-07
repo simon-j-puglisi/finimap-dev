@@ -94,7 +94,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let total_n_words = total_n_bits.div_ceil(64);
         let finimizer_matrix: Vec<AtomicU64> = (0..total_n_words).map(|_| AtomicU64::new(0)).collect();
 
-        let bar = indicatif::ProgressBar::new((sbwt_len*n_finimizers) as u64);
+        let bar = indicatif::ProgressBar::new((sbwt_len*n_colors) as u64);
         (0..n_colors).par_bridge().for_each(|color| { 
             let mut finimizer_idx = 0_usize;
             for colex in 0..sbwt_len {
