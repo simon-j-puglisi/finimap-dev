@@ -107,8 +107,8 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                     finimizer_matrix[word_idx].fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
                     finimizer_idx += 1;
                 }
+                bar.inc(1);
             }
-            bar.inc(1);
             assert_eq!(finimizer_idx, n_finimizers);
 
         });
