@@ -1,4 +1,4 @@
-use std::{cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::AtomicU8, Arc, Mutex}};
+use std::{arch::x86_64::_MM_FROUND_TO_NEG_INF, cmp::min, io::BufRead, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::AtomicU8, Arc, Mutex}};
 
 use clap::builder::styling::Color;
 use crossbeam::channel::{Receiver, RecvError, Sender};
@@ -109,69 +109,68 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 }
 
 // finimizer_lengths should have length |sbwt|, with nonzero entries indicating k-mers who have a finimizer as a suffix
-pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimizer_lengths: &[u8], n_threads: usize) {
+// Returns the concatenation of finimizers in colex order
+pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, finimizer_lengths: &[u8], n_threads: usize) -> Vec<u8> {
     assert_eq!(sbwt.n_sets(), finimizer_lengths.len());
 
     log::info!("Building select suppport");
     sbwt.build_select();
 
-    // Index i has the sum of finimizer_lengths[0..i)
-    let mut cumulative_finimizer_lengths = vec![0_usize; finimizer_lengths.len() + 1]; 
+    log::info!("Planning input and output ranges");
     let mut n_finimizers = 0_usize;
-    for i in 0..finimizer_lengths.len() {
-        cumulative_finimizer_lengths[i+1] = cumulative_finimizer_lengths[i] + finimizer_lengths[i] as usize; 
-        if finimizer_lengths[i] > 0 {
+    let mut total_finimizer_length = 0_usize;
+    for &x in finimizer_lengths.iter() {
+        if x > 0 {
             n_finimizers += 1;
+            total_finimizer_length += x as usize;
         }
     }
 
-    let mut concat = vec![0_u8; *cumulative_finimizer_lengths.last().unwrap()];
+    let mut concat = vec![0_u8; total_finimizer_length];
 
     // Split into mutable segments, one for each thread
     let mut output_segments: Vec<&mut[u8]> = Vec::new();
-    let mut input_segments: Vec<(usize,usize)> = Vec::new(); // (Rank of first finimizer, rank of one past end)
-    let n_finimizers_in_segment = n_finimizers.div_ceil(n_threads);
+    let mut input_sbwt_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut end_ptr = 0_usize;
+    let n_finimizers_in_range = n_finimizers.div_ceil(n_threads);
     let mut tail = concat.as_mut_slice();
-    for t in 0..n_threads {
-        let first_finimizer = n_finimizers_in_segment*t;
-        let end_finimizer = min(n_finimizers_in_segment*(t+1), n_finimizers); // One past end
-        input_segments.push((first_finimizer, end_finimizer));
-        todo!(); // The line below is wrong because cumulative finimizer_lengths includes the finimizer length zeros
-        let concat_slice_len = cumulative_finimizer_lengths[end_finimizer] - cumulative_finimizer_lengths[first_finimizer];
-        let (a,b) = tail.split_at_mut(min(concat_slice_len, tail.len()));
+    for _ in 0..n_threads {
+        let mut n_finimizers_found = 0;
+        let mut total_finimizer_length_found = 0_usize;
+        let start_ptr = end_ptr;
+        while end_ptr < sbwt.n_sets() && n_finimizers_found < n_finimizers_in_range {
+            if finimizer_lengths[end_ptr] > 0 {
+                n_finimizers_found += 1;
+                total_finimizer_length_found += finimizer_lengths[end_ptr] as usize;
+            }
+            end_ptr += 1;
+        }
+        input_sbwt_ranges.push(start_ptr..end_ptr);
+        let (a,b) = tail.split_at_mut(total_finimizer_length_found);
         output_segments.push(a);
         tail = b;
     }
     assert!(tail.is_empty()); // Segmentation is complete
 
+    log::info!("Extracting finimizer strings");
     // Fill in segments in parallel
     output_segments.iter_mut().enumerate().par_bridge().for_each(|(t, out_segment)| {
-        let (first, last) = input_segments[t];
-
-        let mut finimizer_rank = 0_usize;
         let mut output_idx = 0_usize;
-        for colex in 0..sbwt.n_sets() {
+        for colex in input_sbwt_ranges[t].clone() {
             if finimizer_lengths[colex] > 0 {
-                if finimizer_rank >= first {
-                    // Write the finimizer to the concatenation
-                    let kmer = sbwt.access_kmer(colex);
-                    let finimizer = &kmer[kmer.len() - finimizer_lengths[colex] as usize ..];
-                    for &c in finimizer {
-                        out_segment[output_idx] = c;
-                        output_idx += 1;
-                    }
-                }
-
-                finimizer_rank += 1;
-                if finimizer_rank == last {
-                    assert_eq!(output_idx, out_segment.len()); // Everything written
-                    break;
+                // Write the finimizer to the concatenation
+                let kmer = sbwt.access_kmer(colex);
+                let finimizer = &kmer[kmer.len() - finimizer_lengths[colex] as usize ..];
+                for &c in finimizer {
+                    out_segment[output_idx] = c;
+                    output_idx += 1;
                 }
             }
         }
+        assert!(output_idx == out_segment.len());
     });
 
-    todo!(); // Return.
+    concat
 }
 
 #[derive(Debug)]
@@ -327,10 +326,11 @@ impl ColoredFinimizers {
                 .temp_dir(temp_dir)
                 .mem_gb(mem_gb)
         );
-        let (sbwt, lcs) = sbwt_builder.run(input_stream);
+        let (mut sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
         let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
+        let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
 
         /*
 
