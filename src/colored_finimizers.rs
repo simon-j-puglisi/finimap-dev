@@ -94,24 +94,25 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let total_n_words = total_n_bits.div_ceil(64);
         let finimizer_matrix: Vec<AtomicU64> = (0..total_n_words).map(|_| AtomicU64::new(0)).collect();
 
-        let mut finimizer_idx = 0_usize;
-        let bar = indicatif::ProgressBar::new(sbwt_len as u64);
-        for colex in 0..sbwt_len {
-            if finimizer_lengths[colex] > 0 { // This position is a finimizer
-                for color in 0..n_colors {
+        let bar = indicatif::ProgressBar::new((sbwt_len*n_finimizers) as u64);
+        (0..n_colors).par_bridge().for_each(|color| { 
+            let mut finimizer_idx = 0_usize;
+            for colex in 0..sbwt_len {
+                if finimizer_lengths[colex] > 0 { // This position is a finimizer
                     let bit_idx = finimizer_idx*n_colors + color; // We want to set this bit
                     let word_idx = bit_idx / 64;
                     let word_offset = bit_idx % 64;
                     let bit = per_color_bitmaps[color][colex];
                     let mask = (1_u64 << word_offset) * bit as u64;
                     finimizer_matrix[word_idx].fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                    finimizer_idx += 1;
                 }
-                finimizer_idx += 1;
             }
             bar.inc(1);
-        }
+            assert_eq!(finimizer_idx, n_finimizers);
+
+        });
         bar.finish();
-        assert_eq!(finimizer_idx, n_finimizers);
         log::info!("Color matrix finished");
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
