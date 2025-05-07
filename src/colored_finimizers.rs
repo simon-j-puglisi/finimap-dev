@@ -92,6 +92,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         log::info!("Interleaving individual per-color marks");
         let mut interleaved_bitmap = bitvec![usize, Lsb0; 0; n_colors*n_finimizers];
         let mut finimizer_idx = 0_usize;
+        let bar = indicatif::ProgressBar::new(sbwt_len as u64);
         for colex in 0..sbwt_len {
             if finimizer_lengths[colex] > 0 { // This position is a finimizer
                 for color in 0..n_colors {
@@ -99,7 +100,11 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                 }
                 finimizer_idx += 1;
             }
+            bar.inc(1);
         }
+        bar.finish();
+        assert_eq!(finimizer_idx, n_finimizers);
+
         (finimizer_lengths, interleaved_bitmap)
     });
 
