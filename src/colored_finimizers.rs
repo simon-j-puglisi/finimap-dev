@@ -71,7 +71,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        let per_color_bitmaps: Vec<BitVec> = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
+        let mut per_color_bitmaps: (Vec<(usize, BitVec)>) = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
             log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
             let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
             for rec in db.iter() {
@@ -88,8 +88,12 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                     this_color_finimizer_marks.set(colex, true);
                 }
             }
-            this_color_finimizer_marks
+
+            (db_idx, this_color_finimizer_marks)
         }).collect();
+
+        per_color_bitmaps.sort(); // par_bridge does not preserve order -> sort to original order
+        let per_color_bitmaps: Vec<BitVec> = per_color_bitmaps.into_iter().map(|x| x.1).collect(); // Discard the indices
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
@@ -114,7 +118,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let finimizer_matrix: Vec<AtomicU64> = (0..total_n_words).map(|_| AtomicU64::new(0)).collect();
 
         let bar = indicatif::ProgressBar::new((n_colors) as u64);
-        (0..n_colors).par_bridge().for_each(|color| { 
+        (0..n_colors).into_par_iter().for_each(|color| { 
             let mut finimizer_idx = 0_usize;
             for colex in 0..sbwt_len {
                 if finimizer_lengths[colex] > 0 { // This position is a finimizer
@@ -215,8 +219,10 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
             // Check that the marks in ColoredFinimizers match our marks
             for f_idx in 0..n_finimizers {
+                eprintln!("{} {} {}", f_idx, cf.color_sets_bitmap[f_idx * n_colors + color], finimizer_marks[f_idx]);
                 assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
             }
+            log::info!("Color {} OK", path.display());
         }
     });
 
