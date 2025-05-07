@@ -364,5 +364,18 @@ impl ColoredFinimizers {
 
 #[cfg(test)]
 mod tests {
+    use bitvec::prelude::*;
+    #[test] 
+    fn test_bit_order(){
+        let mut my_bv: Vec<u64> = vec![0; 2];
+        my_bv[0] |= (1u64 << 3);
+        my_bv[1] |= (1u64 << 4);
 
+        let my_bv = BitVec::<u64, Lsb0>::from_vec(my_bv);
+        let mut bv = bitvec![u64, Lsb0; 0; 128];
+        bv.set(3, true);
+        bv.set(64 + 4, true);
+
+        assert_eq!(bv, my_bv);
+    }
 }
