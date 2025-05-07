@@ -226,7 +226,6 @@ impl ColoredFinimizers {
             if i > 0 {
                 let a = &self.finimizers_concat[(cumul_len - self.finimizer_lengths[i-1] as usize) .. cumul_len];
                 let b = &self.finimizers_concat[cumul_len .. cumul_len + self.finimizer_lengths[i] as usize];
-                eprintln!("{} {}", String::from_utf8_lossy(a), String::from_utf8_lossy(b));
                 match a.iter().rev().cmp(b.iter().rev()) {
                     std::cmp::Ordering::Equal => panic!("Equal finimizers"),
                     std::cmp::Ordering::Greater => panic!("Non-colex-ordered finimizers"),
