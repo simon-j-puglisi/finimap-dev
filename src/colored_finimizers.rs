@@ -71,7 +71,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        let mut per_color_bitmaps: (Vec<(usize, BitVec)>) = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
+        let per_color_bitmaps: Vec<BitVec> = dbs.par_iter().enumerate().map(|(db_idx, db)| {
             log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
             let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
             for rec in db.iter() {
@@ -89,11 +89,8 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
                 }
             }
 
-            (db_idx, this_color_finimizer_marks)
+            this_color_finimizer_marks
         }).collect();
-
-        per_color_bitmaps.sort(); // par_bridge does not preserve order -> sort to original order
-        let per_color_bitmaps: Vec<BitVec> = per_color_bitmaps.into_iter().map(|x| x.1).collect(); // Discard the indices
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
