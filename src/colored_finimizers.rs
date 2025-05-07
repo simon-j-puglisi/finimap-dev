@@ -43,7 +43,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
         let per_color_bitmaps: Vec<BitVec> = dbs.iter().enumerate().par_bridge().map(|(db_idx, db)| {
-            eprintln!("Processing file {}/{}", db_idx + 1, dbs.len());
+            log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
             let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
             for rec in db.iter() {
                 let seq = rec.seq;
@@ -86,10 +86,10 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
             }
         }
 
-        eprintln!("Number of finimizers = {}", n_finimizers);
-        eprintln!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+        log::info!("Number of finimizers = {}", n_finimizers);
+        log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
 
-        println!("Interleaving individual per-color marks");
+        log::info!("Interleaving individual per-color marks");
         let mut interleaved_bitmap = bitvec![usize, Lsb0; 0; n_colors*n_finimizers];
         let mut finimizer_idx = 0_usize;
         for colex in 0..sbwt_len {
