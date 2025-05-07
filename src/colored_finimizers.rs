@@ -24,6 +24,10 @@ fn has_dna_alphabet(seq: &[u8]) -> bool {
     true
 }
 
+fn colex_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    a.iter().rev().cmp(b.iter().rev())
+}
+
 
 // Returns (len, colex, position in sfs slice)
 #[allow(clippy::manual_flatten)] // More readable
@@ -162,30 +166,55 @@ pub fn verify_finimizer_shortest_uniqueness(cf: &ColoredFinimizers, sbwt: &sbwt:
     });
 }
 
-pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, n_threads: usize, paths: &[PathBuf]) {
+pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &LcsArray, n_threads: usize, paths: &[PathBuf]) {
     let n_finimizers = cf.finimizer_lengths.len();
+    let n_colors = cf.n_colors;
     assert!(cf.n_colors == paths.len());
 
-    // Finimizer length cumulative sum up to but not including the array index 
-    let mut f_starts: Vec<usize> = vec![0; n_finimizers + 1];
+    let mut finimizers: Vec<&[u8]> = Vec::with_capacity(n_finimizers);
+    let mut cumul_finimizer_len = 0_usize;
     for i in 0..n_finimizers {
-        f_starts[i+1] = f_starts[i] + cf.finimizer_lengths[i] as usize;
+        let len = cf.finimizer_lengths[i] as usize;
+        finimizers.push(&cf.finimizers_concat[cumul_finimizer_len..(cumul_finimizer_len + len)]);
+        cumul_finimizer_len += len;
     }
+
+
+    let k = sbwt.k();
+    let index = StreamingIndex::new(sbwt, lcs);
 
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
     thread_pool.install(|| {
-        for path in paths.iter() {
+        for (color, path) in paths.iter().enumerate() {
             log::info!("Processing color {}", path.display());
             let mut reader = DynamicFastXReader::from_file(path).unwrap();
-            while let Some(rec) = reader.read_next().unwrap() {
 
+            // Mark all finimizers (in finimizer order, not sbwt colex order) in this color
+            let mut finimizer_marks: BitVec = bitvec![0; n_finimizers];
+            while let Some(rec) = reader.read_next().unwrap() {
+                let sfs = index.shortest_freq_bound_suffixes(rec.seq, 1);
+                for kmer_end in k..rec.seq.len() { // Exclusive end
+                    if !has_dna_alphabet(&rec.seq[(kmer_end-k)..kmer_end]) {
+                        continue;
+                    }
+                    let (len, _, mut end) = pick_finimizer(&sfs[(kmer_end-k)..kmer_end]);
+                    end += 1; // Exclusive end
+                    let finimizer = &rec.seq[(end-len) .. end];
+
+                    match finimizers.binary_search_by(|test| colex_compare(test, finimizer)) {
+                        Ok(f_idx) => {
+                            finimizer_marks.set(f_idx, true);
+                        },
+                        Err(_) => panic!("Finimizer {} not found with binary search", String::from_utf8_lossy(finimizer)),
+                    }
+                }
+            }
+
+            // Check that the marks in ColoredFinimizers match our marks
+            for f_idx in 0..n_finimizers {
+                assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
             }
         }
-        (0..n_finimizers).par_bridge().for_each(|i| {
-            let s = &cf.finimizers_concat[f_starts[i]..f_starts[i+1]];
-            assert!(sbwt.search(s).unwrap().len() == 1); // Is unique
-            assert!(sbwt.search(&s[1..]).unwrap().len() > 1); // Is not unique
-        });
     });
 
     todo!();
