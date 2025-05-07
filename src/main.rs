@@ -48,7 +48,15 @@ fn main() {
     match args.command {
         Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb } => {
             let input_paths: Vec<PathBuf> = BufReader::new(File::open(input_fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
+
+            log::info!("Building for {} colors", input_paths.len());
             let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir);
+
+            log::info!("Verifying colex order");
+            index.verify_colex_order();
+            log::info!("Colex order ok");
+
+            log::info!("Serializing index");
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
     } 

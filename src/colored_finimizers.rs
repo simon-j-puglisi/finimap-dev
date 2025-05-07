@@ -220,8 +220,21 @@ impl ColoredFinimizers {
         ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors}
     }
 
-    pub fn verify() {
-        todo!();
+    pub fn verify_colex_order(&self) {
+        let mut cumul_len = 0_usize;
+        for i in 0..self.finimizer_lengths.len() {
+            if i > 0 {
+                let a = &self.finimizers_concat[(cumul_len - self.finimizer_lengths[i-1] as usize) .. cumul_len];
+                let b = &self.finimizers_concat[cumul_len .. cumul_len + self.finimizer_lengths[i] as usize];
+                eprintln!("{} {}", String::from_utf8_lossy(a), String::from_utf8_lossy(b));
+                match a.iter().rev().cmp(b.iter().rev()) {
+                    std::cmp::Ordering::Equal => panic!("Equal finimizers"),
+                    std::cmp::Ordering::Less => panic!("Non-colex-ordered finimizers"),
+                    std::cmp::Ordering::Greater => {}, // Ok
+                }
+            }
+            cumul_len += self.finimizer_lengths[i] as usize;
+        }
     }
 }
 
