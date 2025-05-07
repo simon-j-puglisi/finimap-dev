@@ -217,7 +217,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
         }
     });
 
-    todo!();
+    todo!(); // Make parallel
 
 }
 

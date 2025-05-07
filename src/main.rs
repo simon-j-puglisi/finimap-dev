@@ -5,7 +5,7 @@ use bitvec::prelude::*;
 use clap::{builder::PossibleValuesParser, Parser, Subcommand};
 mod colored_finimizers;
 
-use colored_finimizers::{verify_finimizer_shortest_uniqueness, ColoredFinimizers};
+use colored_finimizers::{verify_finimizer_colors, verify_finimizer_shortest_uniqueness, ColoredFinimizers};
 use sbwt::{load_sbwt_index_variant, LcsArray, SbwtIndex, SbwtIndexVariant};
 
 #[derive(Parser)]
@@ -40,14 +40,17 @@ pub enum Subcommands {
 
     #[command(arg_required_else_help = true)]
     Verify {
-        #[arg(help = "A colored finimizers index file", short, long, required = true)]
+        #[arg(help = "A colored finimizers index file", short = 'i', long, required = true)]
         input: PathBuf,
+
+        #[arg(help = "Input sequence file-of-files, one per color", short, long, required = true)]
+        fof: PathBuf,
 
         #[arg(help = "SBWT file", short, long, required = true)]
         sbwt: PathBuf,
 
-        //#[arg(help = "LCS file", short, long, required = true)]
-        //lcs: PathBuf,
+        #[arg(help = "LCS file", short, long, required = true)]
+        lcs: PathBuf,
 
         #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
         n_threads: usize,
@@ -75,15 +78,26 @@ fn main() {
             log::info!("Serializing index");
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
-        Subcommands::Verify { input: input_path, sbwt: sbwt_path, n_threads } => {
+        Subcommands::Verify { input: input_path, fof, sbwt: sbwt_path, lcs: lcs_path, n_threads } => {
             log::info!("Loading ColoredFinimizers");
             let cf = ColoredFinimizers::load(&mut BufReader::new(File::open(input_path).unwrap()));
+
+            log::info!("Loading SBWT");
             let sbwt = load_sbwt_index_variant(&mut BufReader::new(File::open(sbwt_path).unwrap())).unwrap();
-            //let lcs = LcsArray::load(&mut BufReader::new(File::open(lcs_path).unwrap())).unwrap();
+
+            log::info!("Loading LCS");
+            let lcs = LcsArray::load(&mut BufReader::new(File::open(lcs_path).unwrap())).unwrap();
+
+            log::info!("Parsing input file-of-files");
+            let input_paths: Vec<PathBuf> = BufReader::new(File::open(fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
 
             let SbwtIndexVariant::SubsetMatrix(sbwt) = sbwt;
 
+            log::info!("Verifying that finimizers are shortest unique with respect the the SBWT");
             verify_finimizer_shortest_uniqueness(&cf, &sbwt, n_threads);
+
+            log::info!("Verify that the colors of the finimizers are correct");
+            verify_finimizer_colors(&cf, &sbwt, &lcs, n_threads, &input_paths);
 
             log::info!("Verification OK");
         }
