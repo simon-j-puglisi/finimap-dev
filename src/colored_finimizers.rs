@@ -470,7 +470,7 @@ impl ColoredFinimizers {
         //eprintln!("Building select (TODO REMOVE THIS");
         //sbwt.build_select(); // DEBUG TODO REMOVE THIS
 
-        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, false);
+        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, reverse);
         let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
 
         let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
