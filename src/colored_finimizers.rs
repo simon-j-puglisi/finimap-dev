@@ -1,4 +1,5 @@
 use std::{cmp::min, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::{AtomicU64, AtomicU8}, Arc, Mutex}};
+use bytemuck::{cast_slice, Pod};
 
 use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, StreamingIndex, SubsetMatrix};
 use bitvec::prelude::*;
@@ -313,7 +314,7 @@ impl ColoredFinimizers {
         out.write_all(self.finimizer_lengths.as_slice()).unwrap();
         out.write_all(self.finimizers_concat.as_slice()).unwrap();
 
-        let data_bytes: &[u8] = unsafe {std::mem::transmute(self.color_sets_bitmap.as_raw_slice()) };
+        let data_bytes: &[u8] = bytemuck::cast_slice(self.color_sets_bitmap.as_raw_slice());
         assert_eq!(data_bytes.len(), ((n_finimizers * self.n_colors + 63) / 64) * 8);
         out.write_all(data_bytes).unwrap();
     }
@@ -337,7 +338,7 @@ impl ColoredFinimizers {
 
         let mut bitmap_bytes = vec![0_u8; ((n_finimizers * n_colors + 63) as usize / 64) * 8];
         input.read_exact(bitmap_bytes.as_mut_slice()).unwrap();
-        let bitmap_words = unsafe { std::mem::transmute::<&[u8], &[u64]>(&bitmap_bytes) };
+        let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
         let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
 
         ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors: n_colors as usize}
