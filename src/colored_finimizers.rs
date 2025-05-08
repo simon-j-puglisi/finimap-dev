@@ -312,10 +312,12 @@ impl ColoredFinimizers {
         // Write data
         out.write_all(self.finimizer_lengths.as_slice()).unwrap();
         out.write_all(self.finimizers_concat.as_slice()).unwrap();
-        bincode::serialize_into(&mut out, &self.color_sets_bitmap).unwrap();
+
+        let data_bytes: &[u8] = unsafe {std::mem::transmute(self.color_sets_bitmap.as_raw_slice()) };
+        out.write_all(data_bytes).unwrap();
     }
 
-    pub fn load<R: std::io::Read>(mut input: &mut R) -> Self {
+    pub fn load<R: std::io::Read>(input: &mut R) -> Self {
         let mut buf = [0_u8; 8];
         input.read_exact(&mut buf).unwrap();
         let n_finimizers = u64::from_le_bytes(buf);
@@ -324,7 +326,7 @@ impl ColoredFinimizers {
         let finimizer_total_length = u64::from_le_bytes(buf);
 
         input.read_exact(&mut buf).unwrap();
-        let n_colors = u64::from_le_bytes(buf) as usize;
+        let n_colors = u64::from_le_bytes(buf);
 
         let mut finimizer_lengths = vec![0_u8; n_finimizers as usize]; 
         input.read_exact(&mut finimizer_lengths).unwrap();
@@ -332,9 +334,12 @@ impl ColoredFinimizers {
         let mut finimizers_concat = vec![0_u8; finimizer_total_length as usize]; 
         input.read_exact(&mut finimizers_concat).unwrap();
 
-        let color_sets_bitmap: BitVec<u64, Lsb0> = bincode::deserialize_from(&mut input).unwrap();
+        let mut bitmap_bytes = vec![0_u8; ((n_finimizers * n_colors + 63) as usize / 64) * 8];
+        input.read_exact(bitmap_bytes.as_mut_slice()).unwrap();
+        let bitmap_words = unsafe { std::mem::transmute::<&[u8], &[u64]>(&bitmap_bytes) };
+        let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
 
-        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors}
+        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors: n_colors as usize}
     }
 
     pub fn verify_colex_order(&self) {
