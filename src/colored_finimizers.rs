@@ -314,6 +314,7 @@ impl ColoredFinimizers {
         out.write_all(self.finimizers_concat.as_slice()).unwrap();
 
         let data_bytes: &[u8] = unsafe {std::mem::transmute(self.color_sets_bitmap.as_raw_slice()) };
+        assert_eq!(data_bytes.len(), ((n_finimizers * self.n_colors + 63) / 64) * 8);
         out.write_all(data_bytes).unwrap();
     }
 
