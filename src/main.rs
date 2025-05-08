@@ -15,6 +15,11 @@ pub struct Cli {
     pub command: Subcommands,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, clap::ValueEnum)]
+enum SortDir {
+    Lex, Colex
+}
+
 #[derive(Subcommand)]
 pub enum Subcommands {
     #[command(arg_required_else_help = true)]
@@ -30,6 +35,9 @@ pub enum Subcommands {
 
         #[arg(short, required = true)]
         k: usize,
+
+        #[arg(help = "Sort direction", short = 's', long = "sort-dir", default_value = "lex")]
+        sort_dir: SortDir,
 
         #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
         n_threads: usize,
@@ -54,6 +62,9 @@ pub enum Subcommands {
 
         #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
         n_threads: usize,
+
+        #[arg(help = "Sort direction", short = 's', long = "sort-dir", default_value = "lex")]
+        sort_dir: SortDir,
     },
 }
 
@@ -65,11 +76,12 @@ fn main() {
 
     let args = Cli::parse();
     match args.command {
-        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb } => {
+        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb, sort_dir } => {
             let input_paths: Vec<PathBuf> = BufReader::new(File::open(input_fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
 
             log::info!("Building for {} colors", input_paths.len());
-            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir);
+            let reverse = match sort_dir { SortDir::Lex => true, SortDir::Colex => false};
+            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir, reverse);
 
             log::info!("Verifying colex order");
             index.verify_colex_order();
@@ -78,7 +90,7 @@ fn main() {
             log::info!("Serializing index");
             index.serialize(&mut BufWriter::new(File::create(&out_path).unwrap()));
         },
-        Subcommands::Verify { input: input_path, fof, sbwt: sbwt_path, lcs: lcs_path, n_threads } => {
+        Subcommands::Verify { input: input_path, fof, sbwt: sbwt_path, lcs: lcs_path, n_threads, sort_dir} => {
             log::info!("Loading ColoredFinimizers");
             let cf = ColoredFinimizers::load(&mut BufReader::new(File::open(input_path).unwrap()));
 
@@ -97,7 +109,8 @@ fn main() {
             verify_finimizer_shortest_uniqueness(&cf, &sbwt, n_threads);
 
             log::info!("Verify that the colors of the finimizers are correct");
-            verify_finimizer_colors(&cf, &sbwt, &lcs, n_threads, &input_paths);
+            let reverse = match sort_dir { SortDir::Lex => true, SortDir::Colex => false};
+            verify_finimizer_colors(&cf, &sbwt, &lcs, n_threads, &input_paths, reverse);
 
             log::info!("Verification OK");
         }

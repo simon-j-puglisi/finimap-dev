@@ -53,13 +53,13 @@ fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usi
 // v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i.
 // bitmap is the concatenation of the bitmap representation of all finimizers in colex order.
-pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize) -> (Vec<u8>, BitVec<u64, Lsb0>) {
+pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize, reverse: bool) -> (Vec<u8>, BitVec<u64, Lsb0>) {
 
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
 
     let (finimizer_lengths, finimizer_matrix) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
-        let input_stream = InputStream::new(filenames); // Read the data into memory again
+        let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
         let dbs = &input_stream.dbs;
         let sbwt_len = sbwt.n_sets();
         let n_colors = dbs.len();
@@ -164,7 +164,7 @@ pub fn verify_finimizer_shortest_uniqueness(cf: &ColoredFinimizers, sbwt: &sbwt:
     });
 }
 
-pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &LcsArray, n_threads: usize, paths: &[PathBuf]) {
+pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &LcsArray, n_threads: usize, paths: &[PathBuf], reverse: bool) {
     let n_finimizers = cf.finimizer_lengths.len();
     let n_colors = cf.n_colors;
     assert!(cf.n_colors == paths.len());
@@ -185,7 +185,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
     thread_pool.install(|| {
         paths.par_iter().enumerate().for_each(|(color, path)| {
             log::info!("Processing color {}", path.display());
-            let is = InputStream::new(&[path]);
+            let is = InputStream::new(&[path], reverse);
             let db = is.dbs.first().unwrap(); // Also has reverse complements
 
             // Mark all finimizers (in finimizer order, not sbwt colex order) in this color
@@ -358,10 +358,11 @@ struct InputStream {
     dbs: Vec<jseqio::seq_db::SeqDB>,
     cur_db_idx: usize, // Index of the db currently being iterated over
     seq_idx_in_cur_db: usize,
+    reverse: bool, // Reverse sequences (not complement) 
 }
 
 impl InputStream {
-    fn new<P: AsRef<Path>>(filenames: &[P]) -> InputStream {
+    fn new<P: AsRef<Path>>(filenames: &[P], reverse: bool) -> InputStream {
         let mut dbs: Vec<jseqio::seq_db::SeqDB> = vec![];
         for path in filenames {
             let reader = jseqio::reader::DynamicFastXReader::from_file(path).unwrap();
@@ -377,7 +378,19 @@ impl InputStream {
             }
             dbs.push(fw);
         }
-        Self {dbs, cur_db_idx: 0, seq_idx_in_cur_db: 0}
+
+        if reverse {
+            log::info!("Reversing sequences");
+            for db in dbs.iter_mut() {
+                for i in 0..db.sequence_count() {
+                    let rec = db.get_mut(i);
+                    rec.seq.reverse();
+                    rec.qual.map(|q| q.reverse());
+                    // Header is not reversed
+                }
+            }
+        }
+        Self {dbs, cur_db_idx: 0, seq_idx_in_cur_db: 0, reverse}
     }
 }
 
@@ -434,10 +447,10 @@ fn mark_all_kmers_of_seq(bv: Arc<Mutex<BitVec>>, num_colors: usize, color: usize
 impl ColoredFinimizers {
 
     #[allow(clippy::type_complexity)]
-    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, mem_gb: usize, temp_dir: &Path) -> Self {
+    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, mem_gb: usize, temp_dir: &Path, reverse: bool) -> Self {
 
         log::info!("Loading {} sequence files (colors) into memory", filenames.len());
-        let input_stream = InputStream::new(filenames);
+        let input_stream = InputStream::new(filenames, reverse);
         let num_colors = input_stream.dbs.len();
         log::info!("Building SBWT");
         let sbwt_builder = sbwt::SbwtIndexBuilder::new()
@@ -457,7 +470,7 @@ impl ColoredFinimizers {
         //eprintln!("Building select (TODO REMOVE THIS");
         //sbwt.build_select(); // DEBUG TODO REMOVE THIS
 
-        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads);
+        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, false);
         let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
 
         let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
