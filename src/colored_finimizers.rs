@@ -35,7 +35,7 @@ fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usi
     let mut best_i: usize = usize::MAX;
     for (i,x) in sfs_slice.iter().enumerate() {
         if let Some((len, range)) = x {
-            if (*len, range.start) < best {
+            if i < *len && (*len, range.start) < best {
                 best = min(best, (*len, range.start));
                 best_i = i;
             } 
