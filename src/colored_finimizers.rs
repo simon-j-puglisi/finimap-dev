@@ -31,11 +31,14 @@ fn colex_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usize, usize, usize){
     // The finimizer is the shortest unique suffix, with ties broken by colex
 
+    // The full k-mer should have an existing unique match
+    assert!(sfs_slice.last().expect("Empty slice").as_ref().expect("Last SFS pos is None").1.len() == 1);
+
     let mut best: (usize, usize) = (usize::MAX, usize::MAX); // (length, colex)
     let mut best_i: usize = usize::MAX;
     for (i,x) in sfs_slice.iter().enumerate() {
         if let Some((len, range)) = x {
-            if i < *len && (*len, range.start) < best {
+            if i + 1 >= *len && (*len, range.start) < best {
                 best = min(best, (*len, range.start));
                 best_i = i;
             } 
@@ -43,6 +46,7 @@ fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usi
     }
 
     if best == (usize::MAX, usize::MAX){
+        dbg!(sfs_slice);
         panic!("Finimizer not found for kmer");
     }
 
