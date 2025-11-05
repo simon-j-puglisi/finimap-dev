@@ -34,6 +34,9 @@ pub enum Subcommands {
         #[arg(help = "Reverse input sequences", long = "reverse")]
         reverse: bool,
 
+        #[arg(help = "Store color sets as sparse (= lists of integers)", long = "sparse")]
+        sparse: bool,
+
         #[arg(help = "Number of parallel threads", short = 't', long = "n-threads", default_value = "4")]
         n_threads: usize,
 
@@ -71,11 +74,11 @@ fn main() {
 
     let args = Cli::parse();
     match args.command {
-        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb, reverse} => {
+        Subcommands::Build { input: input_fof, output: out_path, temp_dir, k, n_threads, mem_gb, reverse, sparse} => {
             let input_paths: Vec<PathBuf> = BufReader::new(File::open(input_fof).unwrap()).lines().map(|f| PathBuf::from(f.unwrap())).collect();
 
             log::info!("Building for {} colors", input_paths.len());
-            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir, reverse);
+            let index = ColoredFinimizers::new(input_paths.as_slice(), k, n_threads, mem_gb, &temp_dir, reverse, sparse);
 
             log::info!("Verifying colex order");
             index.verify_colex_order();

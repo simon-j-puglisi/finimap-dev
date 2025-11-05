@@ -635,7 +635,7 @@ fn mark_all_kmers_of_seq(bv: Arc<Mutex<BitVec>>, num_colors: usize, color: usize
 impl ColoredFinimizers {
 
     #[allow(clippy::type_complexity)]
-    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, mem_gb: usize, temp_dir: &Path, reverse: bool) -> Self {
+    pub fn new<P: AsRef<Path> + Send + Sync>(filenames: &[P], k: usize, n_threads: usize, mem_gb: usize, temp_dir: &Path, reverse: bool, sparse: bool) -> Self {
 
         log::info!("Loading {} sequence files (colors) into memory", filenames.len());
         let input_stream = InputStream::new(filenames, reverse);
@@ -655,15 +655,17 @@ impl ColoredFinimizers {
         let (mut sbwt, lcs) = sbwt_builder.run(input_stream);
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
-        //eprintln!("Building select (TODO REMOVE THIS");
-        //sbwt.build_select(); // DEBUG TODO REMOVE THIS
-
-        let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, reverse);
-        let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
-
-        let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
-
-        ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets: ColorSetStorage::Dense(interleaved_bitmap), n_colors: num_colors}
+        if sparse {
+            let (finimizer_lengths, interleaved_bitmap) = identify_finimizers_sparse(&sbwt, &lcs, filenames, k, n_threads, reverse);
+            let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
+            let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
+            ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets: ColorSetStorage::Sparse(interleaved_bitmap), n_colors: num_colors}
+        } else {
+            let (finimizer_lengths, interleaved_bitmap) = identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, reverse);
+            let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
+            let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
+            ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets: ColorSetStorage::Dense(interleaved_bitmap), n_colors: num_colors}
+        } 
     }
 }
 
