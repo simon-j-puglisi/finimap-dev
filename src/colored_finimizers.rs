@@ -79,13 +79,13 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
     k: usize,
     n_threads: usize,
     reverse: bool,
-) -> (Vec<u8>, VecConcat) {
+) -> (Vec<u8>, VecConcat, Vec<u8>) {
     let thread_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
         .build()
         .unwrap();
 
-    let (finimizer_lengths, finimizer_matrix) = thread_pool.install(|| {
+    let (finimizer_lengths, finimizer_matrix, global_length_counts) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
         let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
         let dbs = &input_stream.dbs;
@@ -95,17 +95,19 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        let per_color_colex_ranks: Vec<Vec<usize>> = dbs
+        let per_color_results_sparse: Vec<(Vec<usize>, Vec<u32>)> = dbs
             .par_iter()
             .enumerate()
             .map(|(db_idx, db)| {
                 log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
                 let mut this_color_colex_ranks = Vec::<usize>::new();
+                let mut unique_lengths: Vec<u32> = vec![0; k + 1];
+                let mut prev_colex: Option<usize> = None;
                 for rec in db.iter() {
                     let seq = rec.seq;
                     if seq.len() >= k {
                         let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-                        for kmer_end in k..seq.len()+1 {
+                        for kmer_end in k..seq.len() + 1 {
                             // Exclusive end
                             if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
                                 continue;
@@ -116,6 +118,11 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
                             finimizer_lengths[colex]
                                 .store(len as u8, std::sync::atomic::Ordering::Relaxed);
                             this_color_colex_ranks.push(colex);
+
+                            if Some(colex) != prev_colex {
+                                unique_lengths[len] += 1;
+                            }
+                            prev_colex = Some(colex);
                         }
                     }
                 }
@@ -123,9 +130,21 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
                 // Sort and deduplicate. Later code depends on the assumption that this is done.
                 this_color_colex_ranks.sort();
                 this_color_colex_ranks.dedup();
-                this_color_colex_ranks
+                (this_color_colex_ranks, unique_lengths)
             })
             .collect();
+
+        let mut per_color_colex_ranks: Vec<Vec<usize>> = per_color_results_sparse
+            .iter()
+            .map(|(bv, _)| bv.clone())
+            .collect();
+
+        let mut global_length_counts: Vec<u32> = vec![0; k + 1];
+        for (_, counts) in per_color_results_sparse {
+            for (len, &count) in counts.iter().enumerate() {
+                global_length_counts[len] += count;
+            }
+        }
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_lengths: Vec<u8> = finimizer_lengths
@@ -221,10 +240,21 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
                 concat: color_set_concat,
                 ends: color_set_starts,
             },
+            global_length_counts,
         )
     });
+    let mut lengths_by_freq: Vec<u8> = {
+        let mut vec: Vec<(u8, u32)> = global_length_counts
+            .iter()
+            .enumerate()
+            .filter(|&(len, &count)| len > 0 && count > 0)
+            .map(|(len, &count)| (len as u8, count))
+            .collect();
+        vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        vec.into_iter().map(|(len, _)| len).collect()
+    };
 
-    (finimizer_lengths, finimizer_matrix)
+    (finimizer_lengths, finimizer_matrix, lengths_by_freq)
 }
 
 // Returns (v, bitmap), where:
@@ -238,13 +268,13 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
     k: usize,
     n_threads: usize,
     reverse: bool,
-) -> (Vec<u8>, BitVec<u64, Lsb0>) {
+) -> (Vec<u8>, BitVec<u64, Lsb0>, Vec<u8>) {
     let thread_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
         .build()
         .unwrap();
 
-    let (finimizer_lengths, finimizer_matrix) = thread_pool.install(|| {
+    let (finimizer_lengths, finimizer_matrix, global_length_counts) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
         let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
         let dbs = &input_stream.dbs;
@@ -254,16 +284,18 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        let per_color_bitmaps: Vec<BitVec> = dbs
+        let per_color_results: Vec<(BitVec, Vec<u32>)> = dbs
             .par_iter()
             .enumerate()
             .map(|(db_idx, db)| {
                 log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
                 let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
+                let mut unique_lengths: Vec<u32> = vec![0; k + 1];
+                let mut prev_colex: Option<usize> = None;
                 for rec in db.iter() {
                     let seq = rec.seq;
                     let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-                    for kmer_end in k..seq.len() +1 {
+                    for kmer_end in k..seq.len() + 1 {
                         // Exclusive end
                         if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
                             continue;
@@ -274,12 +306,27 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
                         finimizer_lengths[colex]
                             .store(len as u8, std::sync::atomic::Ordering::Relaxed);
                         this_color_finimizer_marks.set(colex, true);
+
+                        if Some(colex) != prev_colex {
+                            unique_lengths[len] += 1;
+                        }
+                        prev_colex = Some(colex);
                     }
                 }
 
-                this_color_finimizer_marks
+                (this_color_finimizer_marks, unique_lengths)
             })
             .collect();
+
+        let per_color_bitmaps: Vec<BitVec> =
+            per_color_results.iter().map(|(bv, _)| bv.clone()).collect();
+
+        let mut global_length_counts: Vec<u32> = vec![0; k + 1];
+        for (_, counts) in per_color_results {
+            for (len, &count) in counts.iter().enumerate() {
+                global_length_counts[len] += count;
+            }
+        }
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_lengths: Vec<u8> = finimizer_lengths
@@ -338,10 +385,22 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
         (
             finimizer_lengths,
             BitVec::<u64, Lsb0>::from_vec(finimizer_matrix),
+            global_length_counts,
         )
     });
 
-    (finimizer_lengths, finimizer_matrix)
+    let mut lengths_by_freq: Vec<u8> = {
+        let mut vec: Vec<(u8, u32)> = global_length_counts
+            .iter()
+            .enumerate()
+            .filter(|&(len, &count)| len > 0 && count > 0)
+            .map(|(len, &count)| (len as u8, count))
+            .collect();
+        vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        vec.into_iter().map(|(len, _)| len).collect()
+    };
+
+    (finimizer_lengths, finimizer_matrix, lengths_by_freq)
 }
 
 pub fn verify_finimizer_shortest_uniqueness(
@@ -410,7 +469,7 @@ pub fn verify_finimizer_colors(
             let mut finimizer_marks: BitVec = bitvec![0; n_finimizers];
             for rec in db.iter() {
                 let sfs = index.shortest_freq_bound_suffixes(rec.seq, 1);
-                for kmer_end in k..rec.seq.len()+1 {
+                for kmer_end in k..rec.seq.len() + 1 {
                     // Exclusive end
                     if !has_dna_alphabet(&rec.seq[(kmer_end - k)..kmer_end]) {
                         continue;
@@ -574,6 +633,7 @@ pub struct ColoredFinimizers {
     //color_sets_bitmap: BitVec<u64, Lsb0>, // concatenation of finimizer color set bit maps, in colex order of finimizers
     color_sets: ColorSetStorage,
     n_colors: usize,
+    pub lengths_by_freq: Vec<u8>,
 }
 
 impl ColoredFinimizers {
@@ -607,6 +667,9 @@ impl ColoredFinimizers {
                 vec_concat.serialize(out);
             }
         }
+        out.write_all(&(self.lengths_by_freq.len() as u64).to_le_bytes())
+            .unwrap();
+        out.write_all(self.lengths_by_freq.as_slice()).unwrap();
     }
 
     pub fn load<R: std::io::Read>(input: &mut R) -> Self {
@@ -630,11 +693,19 @@ impl ColoredFinimizers {
         input.read_exact(&mut is_sparse).unwrap();
         if is_sparse[0] == 1 {
             let vec_concat = VecConcat::load(input);
+
+            // Read lengths_by_freq (as Vec<u8>)
+            input.read_exact(&mut buf).unwrap();
+            let n_lengths_by_freq = u64::from_le_bytes(buf);
+            let mut lengths_by_freq = vec![0_u8; n_lengths_by_freq as usize];
+            input.read_exact(&mut lengths_by_freq).unwrap();
+
             ColoredFinimizers {
                 finimizer_lengths,
                 finimizers_concat,
                 color_sets: ColorSetStorage::Sparse(vec_concat),
                 n_colors: n_colors as usize,
+                lengths_by_freq,
             }
         } else {
             let mut bitmap_bytes = vec![0_u8; ((n_finimizers * n_colors + 63) as usize / 64) * 8];
@@ -642,11 +713,18 @@ impl ColoredFinimizers {
             let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
             let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
 
+            // Read lengths_by_freq (as Vec<u8>)
+            input.read_exact(&mut buf).unwrap();
+            let n_lengths_by_freq = u64::from_le_bytes(buf);
+            let mut lengths_by_freq = vec![0_u8; n_lengths_by_freq as usize];
+            input.read_exact(&mut lengths_by_freq).unwrap();
+
             ColoredFinimizers {
                 finimizer_lengths,
                 finimizers_concat,
                 color_sets: ColorSetStorage::Dense(color_sets_bitmap),
                 n_colors: n_colors as usize,
+                lengths_by_freq,
             }
         }
     }
@@ -831,7 +909,7 @@ impl ColoredFinimizers {
         let lcs = lcs.unwrap(); // Ok since used build_lcs(true) above
 
         if sparse {
-            let (finimizer_lengths, interleaved_bitmap) =
+            let (finimizer_lengths, interleaved_bitmap, sorted_lengths) =
                 identify_finimizers_sparse(&sbwt, &lcs, filenames, k, n_threads, reverse);
             let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
             let nonzero_lengths: Vec<u8> =
@@ -841,9 +919,10 @@ impl ColoredFinimizers {
                 finimizers_concat: concat,
                 color_sets: ColorSetStorage::Sparse(interleaved_bitmap),
                 n_colors: num_colors,
+                lengths_by_freq: sorted_lengths,
             }
         } else {
-            let (finimizer_lengths, interleaved_bitmap) =
+            let (finimizer_lengths, interleaved_bitmap, sorted_lengths) =
                 identify_finimizers(&sbwt, &lcs, filenames, k, n_threads, reverse);
             let concat = get_finimizer_strings(&mut sbwt, &finimizer_lengths, n_threads);
             let nonzero_lengths: Vec<u8> =
@@ -853,6 +932,7 @@ impl ColoredFinimizers {
                 finimizers_concat: concat,
                 color_sets: ColorSetStorage::Dense(interleaved_bitmap),
                 n_colors: num_colors,
+                lengths_by_freq: sorted_lengths,
             }
         }
     }
