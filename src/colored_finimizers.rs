@@ -126,7 +126,7 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::Sbw
         // Figure out the starting points of color sets in the concatenation
         let mut color_set_starts = Vec::<usize>::with_capacity(color_set_sizes.len() + 1); // Sentinel value at the end
         for i in 1..color_set_starts.len() {
-            color_set_starts[i] = (color_set_sizes[i-1] + color_set_sizes[i-1]) as usize;
+            color_set_starts.push((color_set_sizes[i-1] + color_set_sizes[i-1]) as usize);
         }
         drop(color_set_sizes); // Free memory
 
