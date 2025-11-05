@@ -54,6 +54,103 @@ fn pick_finimizer(sfs_slice: &[Option<(usize, std::ops::Range<usize>)>]) -> (usi
 
 }
 
+pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>, lcs: &sbwt::LcsArray, filenames: &[P], k: usize, n_threads: usize, reverse: bool) -> (Vec<u8>, VecConcat) {
+
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(n_threads).build().unwrap();
+
+    let (finimizer_lengths, finimizer_matrix) = thread_pool.install(|| {
+        log::info!("Reading input sequences into memory");
+        let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
+        let dbs = &input_stream.dbs;
+        let sbwt_len = sbwt.n_sets();
+        let n_colors = dbs.len();
+
+        let index = StreamingIndex::new(sbwt, lcs);
+        let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
+
+        let per_color_colex_ranks: Vec<Vec<usize>> = dbs.par_iter().enumerate().map(|(db_idx, db)| {
+            log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
+            let mut this_color_colex_ranks = Vec::<usize>::new();
+            for rec in db.iter() {
+                let seq = rec.seq;
+                let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
+                for kmer_end in k..seq.len() { // Exclusive end
+                    if !has_dna_alphabet(&seq[(kmer_end-k)..kmer_end]) {
+                        continue;
+                    }
+
+                    let (len, colex, _) = pick_finimizer(&sus[(kmer_end-k) .. kmer_end]);
+
+                    finimizer_lengths[colex].store(len as u8, std::sync::atomic::Ordering::Relaxed);
+                    this_color_colex_ranks.push(colex);
+                }
+            }
+
+            this_color_colex_ranks.sort();
+            this_color_colex_ranks.dedup();
+            this_color_colex_ranks
+        }).collect();
+
+        // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
+        let finimizer_lengths: Vec<u8> = finimizer_lengths.into_iter().map(|x| x.into_inner()).collect();
+
+        // Figure out how many finimizers we have and their average length
+        let mut n_finimizers = 0_usize;
+        let mut total_length = 0_usize;
+
+        for &x in finimizer_lengths.iter() {
+            if x > 0 {
+                n_finimizers += 1;
+                total_length += x as usize;
+            }
+        }
+
+        log::info!("Number of finimizers = {}", n_finimizers);
+        log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+
+        let color_set_sizes: Vec<AtomicU64> = (0..sbwt_len).map(|_| AtomicU64::new(0)).collect();
+
+        log::info!("Computing color set sizes");
+        let bar = indicatif::ProgressBar::new((n_colors) as u64);
+        (0..n_colors).into_par_iter().for_each(|color| { 
+            for &colex in per_color_colex_ranks[color].iter() {
+                color_set_sizes[colex].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            bar.inc(1);
+        });
+        bar.finish();
+
+        // Convert from atomic to regular integers
+        let color_set_sizes: Vec<u64> = color_set_sizes.into_iter().map(|x| x.into_inner()).collect();
+
+        // Figure out the starting points of color sets in the concatenation
+        let mut color_set_starts = Vec::<usize>::with_capacity(color_set_sizes.len() + 1); // Sentinel value at the end
+        for i in 1..color_set_starts.len() {
+            color_set_starts[i] = (color_set_sizes[i-1] + color_set_sizes[i-1]) as usize;
+        }
+        drop(color_set_sizes); // Free memory
+
+        // Allocate the space for the color set concatenation
+        let mut color_set_concat = vec![0; *color_set_starts.last().unwrap()];
+
+        log::info!("Constructing color sets");
+        for (color, colex_ranks_for_color) in per_color_colex_ranks.into_iter().enumerate() {
+            for colex in colex_ranks_for_color {
+                color_set_concat[color_set_starts[colex]] = color;
+                color_set_starts[colex] += 1;
+            }
+        }
+
+        // color_set_starts are now ends
+        color_set_starts.pop(); // Remove the sentinel at the end
+
+        (finimizer_lengths, VecConcat{concat: color_set_concat, ends: color_set_starts})
+    });
+
+    (finimizer_lengths, finimizer_matrix)
+
+}
+
 // Returns (v, bitmap), where:
 // v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i.
@@ -296,10 +393,23 @@ pub fn get_finimizer_strings(sbwt: &mut sbwt::SbwtIndex<sbwt::SubsetMatrix>, fin
 }
 
 #[derive(Debug)]
+struct VecConcat {
+    concat: Vec<usize>,
+    ends: Vec<usize>, // Exclusive ends
+}
+
+#[derive(Debug)]
+enum ColorSetStorage {
+    Dense(BitVec<u64, Lsb0>), // Concatenation of bitvectors
+    Sparse(VecConcat)
+}
+
+#[derive(Debug)]
 pub struct ColoredFinimizers {
     finimizer_lengths: Vec<u8>, // Lengths of finimizers, in colex order
     finimizers_concat: Vec<u8>, // concatenation of finimizers in colex order in ASCII
-    color_sets_bitmap: BitVec<u64, Lsb0>, // concatenation of finimizer color set bit maps, in colex order of finimizers 
+    //color_sets_bitmap: BitVec<u64, Lsb0>, // concatenation of finimizer color set bit maps, in colex order of finimizers 
+    color_sets: ColorSetStorage,
     n_colors: usize,
 }
 
@@ -345,7 +455,7 @@ impl ColoredFinimizers {
         let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
         let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
 
-        ColoredFinimizers {finimizer_lengths,  finimizers_concat, color_sets_bitmap, n_colors: n_colors as usize}
+        ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets_bitmap, n_colors: n_colors as usize}
     }
 
     pub fn verify_colex_order(&self) {
