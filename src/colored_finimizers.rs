@@ -314,7 +314,7 @@ pub fn verify_finimizer_colors(cf: &ColoredFinimizers, sbwt: &sbwt::SbwtIndex<sb
 
             // Check that the marks in ColoredFinimizers match our marks
             for f_idx in 0..n_finimizers {
-                assert!(cf.color_sets_bitmap[f_idx * n_colors + color] == finimizer_marks[f_idx]);
+                assert!(cf.get_set(f_idx)[color] == finimizer_marks[f_idx]);
             }
             log::info!("Color {} OK", path.display());
         });
@@ -475,19 +475,15 @@ impl ColoredFinimizers {
     }
 
     // Returns the set with the given index as an indicator bit vector
-    pub fn get_set(&self, set_idx: usize) -> BitVec<u64, Lsb0> {
+    pub fn set_has_color(&self, set_idx: usize, color: usize) -> bool {
         match &self.color_sets {
             ColorSetStorage::Dense(bitmap) => {
-                bitmap[set_idx * self.n_colors .. (set_idx + 1) * self.n_colors].to_owned()
+                bitmap[set_idx * self.n_colors + color]
             },
             ColorSetStorage::Sparse(ds) => {
-                let mut bv = bitvec![u64, Lsb0; 0; self.n_colors];
                 let start = if set_idx == 0 {0} else { ds.ends[set_idx -1] };
                 let end = ds.ends[set_idx];
-                for &color in &ds.concat[start..end] {
-                    bv.set(color, true);
-                }
-                bv
+                ds.concat[start..end].iter().any(|&c| c == color)
             }
         }
     }
