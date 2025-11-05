@@ -105,7 +105,7 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
                     let seq = rec.seq;
                     if seq.len() >= k {
                         let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-                        for kmer_end in k..seq.len() {
+                        for kmer_end in k..seq.len()+1 {
                             // Exclusive end
                             if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
                                 continue;
@@ -263,7 +263,7 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
                 for rec in db.iter() {
                     let seq = rec.seq;
                     let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-                    for kmer_end in k..seq.len() {
+                    for kmer_end in k..seq.len() +1 {
                         // Exclusive end
                         if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
                             continue;
@@ -410,7 +410,7 @@ pub fn verify_finimizer_colors(
             let mut finimizer_marks: BitVec = bitvec![0; n_finimizers];
             for rec in db.iter() {
                 let sfs = index.shortest_freq_bound_suffixes(rec.seq, 1);
-                for kmer_end in k..rec.seq.len() {
+                for kmer_end in k..rec.seq.len()+1 {
                     // Exclusive end
                     if !has_dna_alphabet(&rec.seq[(kmer_end - k)..kmer_end]) {
                         continue;
