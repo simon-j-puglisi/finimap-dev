@@ -86,6 +86,7 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::Sbw
                 }
             }
 
+            // Sort and deduplicate. Later code depends on the assumption that this is done.
             this_color_colex_ranks.sort();
             this_color_colex_ranks.dedup();
             this_color_colex_ranks
@@ -108,13 +109,24 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::Sbw
         log::info!("Number of finimizers = {}", n_finimizers);
         log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
 
-        let color_set_sizes: Vec<AtomicU64> = (0..sbwt_len).map(|_| AtomicU64::new(0)).collect();
+        let color_set_sizes: Vec<AtomicU64> = (0..n_finimizers).map(|_| AtomicU64::new(0)).collect();
 
         log::info!("Computing color set sizes");
         let bar = indicatif::ProgressBar::new((n_colors) as u64);
         (0..n_colors).into_par_iter().for_each(|color| { 
-            for &colex in per_color_colex_ranks[color].iter() {
-                color_set_sizes[colex].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut finimizer_idx = 0_usize; // Keep track of the current finimizer index
+            let mut sbwt_pos = 0_usize;
+            for &colex in per_color_colex_ranks[color].iter() { // Assumes the Vec is sorted
+                while sbwt_pos < colex {
+                    if finimizer_lengths[sbwt_pos] > 0 { // This finimizer exists
+                        finimizer_idx += 1;
+                    }
+                    sbwt_pos += 1;
+                }
+
+                if finimizer_lengths[colex] > 0 { // This colex position is a finimizer
+                    color_set_sizes[finimizer_idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             bar.inc(1);
         });
@@ -135,11 +147,25 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::Sbw
 
         log::info!("Constructing color sets");
         for (color, colex_ranks_for_color) in per_color_colex_ranks.into_iter().enumerate() {
+            let mut finimizer_idx = 0_usize; // Keep track of the current finimizer index
+            let mut sbwt_pos = 0_usize;
             for colex in colex_ranks_for_color {
-                color_set_concat[color_set_starts[colex]] = color;
-                color_set_starts[colex] += 1;
+                while sbwt_pos < colex {
+                    if finimizer_lengths[sbwt_pos] > 0 { // This finimizer exists
+                        finimizer_idx += 1;
+                    }
+                    sbwt_pos += 1;
+                }
+
+                if finimizer_lengths[colex] > 0 { // This colex position is a finimizer
+                    color_set_concat[color_set_starts[finimizer_idx]] = color;
+                    color_set_starts[finimizer_idx] += 1;
+                }
             }
         }
+
+        eprintln!("{:?}", &color_set_starts[0..50]);
+        eprintln!("{:?}", &color_set_concat[0..50]);
 
         // color_set_starts are now ends
         color_set_starts.pop(); // Remove the sentinel at the end
@@ -236,6 +262,9 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_matrix: Vec<u64> = finimizer_matrix.into_iter().map(|x| x.into_inner()).collect();
+        
+        let debug_bv: BitVec<u64, Lsb0> = BitVec::from_vec(finimizer_matrix.clone());
+        eprintln!("{:?}", &debug_bv[0..min(50*n_colors, debug_bv.len())]);
 
         (finimizer_lengths, BitVec::<u64, Lsb0>::from_vec(finimizer_matrix))
     });
