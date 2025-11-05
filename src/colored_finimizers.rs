@@ -428,9 +428,15 @@ impl ColoredFinimizers {
         out.write_all(self.finimizer_lengths.as_slice()).unwrap();
         out.write_all(self.finimizers_concat.as_slice()).unwrap();
 
-        let data_bytes: &[u8] = bytemuck::cast_slice(self.color_sets_bitmap.as_raw_slice());
-        assert_eq!(data_bytes.len(), ((n_finimizers * self.n_colors + 63) / 64) * 8);
-        out.write_all(data_bytes).unwrap();
+
+        match &self.color_sets {
+            ColorSetStorage::Dense(bitmap) => {
+                let data_bytes: &[u8] = bytemuck::cast_slice(bitmap.as_raw_slice());
+                assert_eq!(data_bytes.len(), ((n_finimizers * self.n_colors + 63) / 64) * 8);
+                out.write_all(data_bytes).unwrap();
+            },
+            ColorSetStorage::Sparse(vec_concat) => todo!(),
+        }
     }
 
     pub fn load<R: std::io::Read>(input: &mut R) -> Self {
@@ -454,8 +460,9 @@ impl ColoredFinimizers {
         input.read_exact(bitmap_bytes.as_mut_slice()).unwrap();
         let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
         let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
+        // TODO: LOAD SPARSE SETS IF THEY ARE SPARSE
 
-        ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets_bitmap, n_colors: n_colors as usize}
+        ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets: ColorSetStorage::Dense(color_sets_bitmap), n_colors: n_colors as usize}
     }
 
     pub fn verify_colex_order(&self) {
@@ -610,7 +617,7 @@ impl ColoredFinimizers {
 
         let nonzero_lengths: Vec<u8> = finimizer_lengths.into_iter().filter(|x| *x > 0).collect();
 
-        ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets_bitmap: interleaved_bitmap, n_colors: num_colors}
+        ColoredFinimizers { finimizer_lengths: nonzero_lengths, finimizers_concat: concat, color_sets: ColorSetStorage::Dense(interleaved_bitmap), n_colors: num_colors}
     }
 }
 
