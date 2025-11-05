@@ -1,4 +1,4 @@
-use std::{cmp::min, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::{AtomicU64, AtomicU8}, Arc, Mutex}};
+use std::{cmp::min, io::Write, ops::DerefMut, path::{Path, PathBuf}, sync::{atomic::{AtomicU64, AtomicU8}, Arc, Mutex}};
 use bytemuck::{cast_slice, Pod};
 
 use sbwt::{self, BitPackedKmerSorting, LcsArray, SbwtIndex, SeqStream, StreamingIndex, SubsetMatrix};
@@ -398,6 +398,43 @@ struct VecConcat {
     ends: Vec<usize>, // Exclusive ends
 }
 
+impl VecConcat {
+    fn serialize<W: Write>(&self, out: &mut W) {
+        let n_elements = self.concat.len() as u64;
+        let n_sets = self.ends.len() as u64;
+
+        out.write_all(&n_elements.to_le_bytes()).unwrap();
+        out.write_all(&n_sets.to_le_bytes()).unwrap();
+
+        let concat_bytes: &[u8] = bytemuck::cast_slice(self.concat.as_slice());
+        out.write_all(concat_bytes).unwrap();
+
+        let ends_bytes: &[u8] = bytemuck::cast_slice(self.ends.as_slice());
+        out.write_all(ends_bytes).unwrap();
+    }
+
+    fn load<R: std::io::Read>(input: &mut R) -> Self {
+        let mut buf = [0_u8; 8];
+        input.read_exact(&mut buf).unwrap();
+        let n_elements = u64::from_le_bytes(buf);
+
+        input.read_exact(&mut buf).unwrap();
+        let n_sets = u64::from_le_bytes(buf);
+
+        let mut concat_bytes = vec![0_u8; (n_elements as usize) * std::mem::size_of::<usize>()];
+        input.read_exact(concat_bytes.as_mut_slice()).unwrap();
+        let concat: Vec<usize> = bytemuck::cast_slice(&concat_bytes).to_vec();
+        // Todo: cast_slice makes a copy
+
+        let mut ends_bytes = vec![0_u8; (n_sets as usize) * std::mem::size_of::<usize>()];
+        input.read_exact(ends_bytes.as_mut_slice()).unwrap();
+        let ends: Vec<usize> = bytemuck::cast_slice(&ends_bytes).to_vec();
+        // Todo: cast_slice makes a copy
+
+        VecConcat {concat, ends}
+    }
+}
+
 #[derive(Debug)]
 enum ColorSetStorage {
     Dense(BitVec<u64, Lsb0>), // Concatenation of bitvectors
@@ -428,14 +465,17 @@ impl ColoredFinimizers {
         out.write_all(self.finimizer_lengths.as_slice()).unwrap();
         out.write_all(self.finimizers_concat.as_slice()).unwrap();
 
-
         match &self.color_sets {
             ColorSetStorage::Dense(bitmap) => {
+                out.write_all(&[0u8]).unwrap(); // Byte indicating that this is a dense structure
                 let data_bytes: &[u8] = bytemuck::cast_slice(bitmap.as_raw_slice());
                 assert_eq!(data_bytes.len(), ((n_finimizers * self.n_colors + 63) / 64) * 8);
                 out.write_all(data_bytes).unwrap();
             },
-            ColorSetStorage::Sparse(vec_concat) => todo!(),
+            ColorSetStorage::Sparse(vec_concat) => {
+                out.write_all(&[1u8]).unwrap(); // Byte indicating that this is a sparse structure
+                vec_concat.serialize(out);
+            }
         }
     }
 
@@ -456,13 +496,19 @@ impl ColoredFinimizers {
         let mut finimizers_concat = vec![0_u8; finimizer_total_length as usize]; 
         input.read_exact(&mut finimizers_concat).unwrap();
 
-        let mut bitmap_bytes = vec![0_u8; ((n_finimizers * n_colors + 63) as usize / 64) * 8];
-        input.read_exact(bitmap_bytes.as_mut_slice()).unwrap();
-        let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
-        let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
-        // TODO: LOAD SPARSE SETS IF THEY ARE SPARSE
+        let mut is_sparse = [0_u8; 1];
+        input.read_exact(&mut is_sparse).unwrap();
+        if is_sparse[0] == 1 {
+            let vec_concat = VecConcat::load(input);
+            ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets: ColorSetStorage::Sparse(vec_concat), n_colors: n_colors as usize}
+        } else {
+            let mut bitmap_bytes = vec![0_u8; ((n_finimizers * n_colors + 63) as usize / 64) * 8];
+            input.read_exact(bitmap_bytes.as_mut_slice()).unwrap();
+            let bitmap_words: &[u64] = bytemuck::cast_slice(&bitmap_bytes);
+            let color_sets_bitmap = BitVec::<u64, Lsb0>::from_slice(bitmap_words); // Todo: this makes a copy
 
-        ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets: ColorSetStorage::Dense(color_sets_bitmap), n_colors: n_colors as usize}
+            ColoredFinimizers {finimizer_lengths, finimizers_concat, color_sets: ColorSetStorage::Dense(color_sets_bitmap), n_colors: n_colors as usize}
+        }
     }
 
     pub fn verify_colex_order(&self) {
