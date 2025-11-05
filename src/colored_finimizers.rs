@@ -164,9 +164,6 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::Sbw
             }
         }
 
-        eprintln!("{:?}", &color_set_starts[0..50]);
-        eprintln!("{:?}", &color_set_concat[0..50]);
-
         // color_set_starts are now ends
         color_set_starts.pop(); // Remove the sentinel at the end
 
@@ -263,9 +260,6 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(sbwt: &sbwt::SbwtIndex<
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
         let finimizer_matrix: Vec<u64> = finimizer_matrix.into_iter().map(|x| x.into_inner()).collect();
         
-        let debug_bv: BitVec<u64, Lsb0> = BitVec::from_vec(finimizer_matrix.clone());
-        eprintln!("{:?}", &debug_bv[0..min(50*n_colors, debug_bv.len())]);
-
         (finimizer_lengths, BitVec::<u64, Lsb0>::from_vec(finimizer_matrix))
     });
 
