@@ -473,6 +473,24 @@ impl ColoredFinimizers {
             cumul_len += self.finimizer_lengths[i] as usize;
         }
     }
+
+    // Returns the set with the given index as an indicator bit vector
+    pub fn get_set(&self, set_idx: usize) -> BitVec<u64, Lsb0> {
+        match &self.color_sets {
+            ColorSetStorage::Dense(bitmap) => {
+                bitmap[set_idx * self.n_colors .. (set_idx + 1) * self.n_colors].to_owned()
+            },
+            ColorSetStorage::Sparse(ds) => {
+                let mut bv = bitvec![u64, Lsb0; 0; self.n_colors];
+                let start = if set_idx == 0 {0} else { ds.ends[set_idx -1] };
+                let end = ds.ends[set_idx];
+                for &color in &ds.concat[start..end] {
+                    bv.set(color, true);
+                }
+                bv
+            }
+        }
+    }
 }
 
 struct InputStream {
