@@ -87,8 +87,10 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
 
     let (finimizer_lengths, finimizer_matrix, global_length_counts) = thread_pool.install(|| {
         log::info!("Reading input sequences into memory");
-        let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
-        let dbs = &input_stream.dbs;
+        // Read the data into memory again
+        let dbs: Vec<jseqio::seq_db::SeqDB> =
+            filenames.iter().map(|p| load_db(p, reverse)).collect();
+        let dbs = &dbs;
         let sbwt_len = sbwt.n_sets();
         let n_colors = dbs.len();
 
@@ -257,10 +259,105 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
     (finimizer_lengths, finimizer_matrix, lengths_by_freq)
 }
 
+// Calls f(len, colex) for the finimizer of every k-mer of the sequences in db, in sequence order.
+fn for_each_finimizer<F: FnMut(usize, usize)>(
+    index: &StreamingIndex<'_, SbwtIndex<SubsetMatrix>, LcsArray>,
+    db: &jseqio::seq_db::SeqDB,
+    k: usize,
+    mut f: F,
+) {
+    for rec in db.iter() {
+        let seq = rec.seq;
+        let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
+        for kmer_end in k..seq.len() + 1 {
+            // Exclusive end
+            if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
+                continue;
+            }
+
+            let (len, colex, _) = pick_finimizer(&sus[(kmer_end - k)..kmer_end]);
+            f(len, colex);
+        }
+    }
+}
+
+// Rank support over the SBWT positions that are finimizers: rank(i) is the number of
+// finimizer positions before position i. Takes two bits per SBWT position.
+struct FinimizerRank {
+    words: Vec<u64>,       // Bit i is set iff SBWT position i is a finimizer
+    block_ranks: Vec<u64>, // Number of set bits before each word
+}
+
+impl FinimizerRank {
+    fn new(finimizer_lengths: &[u8]) -> Self {
+        let mut words = vec![0_u64; finimizer_lengths.len().div_ceil(64)];
+        for (i, &len) in finimizer_lengths.iter().enumerate() {
+            if len > 0 {
+                words[i / 64] |= 1_u64 << (i % 64);
+            }
+        }
+        let mut block_ranks = Vec::with_capacity(words.len());
+        let mut total = 0_u64;
+        for w in words.iter() {
+            block_ranks.push(total);
+            total += w.count_ones() as u64;
+        }
+        Self { words, block_ranks }
+    }
+
+    fn rank(&self, i: usize) -> usize {
+        let below = self.words[i / 64] & ((1_u64 << (i % 64)) - 1);
+        self.block_ranks[i / 64] as usize + below.count_ones() as usize
+    }
+}
+
+// Appends x to out as a variable-length integer (7 bits per byte, low bits first).
+fn push_varint(out: &mut Vec<u8>, mut x: usize) {
+    while x >= 0x80 {
+        out.push((x as u8 & 0x7f) | 0x80);
+        x >>= 7;
+    }
+    out.push(x as u8);
+}
+
+// Encodes a strictly increasing list of integers as the varints of its gaps.
+fn encode_increasing(values: &[usize]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut prev = 0_usize;
+    for &x in values {
+        push_varint(&mut out, x - prev);
+        prev = x;
+    }
+    out.shrink_to_fit();
+    out
+}
+
+// Calls f on each integer of a list encoded with encode_increasing, in increasing order.
+fn decode_increasing<F: FnMut(usize)>(bytes: &[u8], mut f: F) {
+    let mut value = 0_usize;
+    let mut gap = 0_usize;
+    let mut shift = 0_u32;
+    for &b in bytes {
+        gap |= ((b & 0x7f) as usize) << shift;
+        if b & 0x80 == 0 {
+            value += gap;
+            f(value);
+            gap = 0;
+            shift = 0;
+        } else {
+            shift += 7;
+        }
+    }
+}
+
 // Returns (v, bitmap), where:
 // v is a vec of length |SBWT| such that v[i] is zero if k-mer i does not have a finimizer as a suffix, otherwise
 // v[i] is the length of the finimizer that is a suffix of k-mer i.
 // bitmap is the concatenation of the bitmap representation of all finimizers in colex order.
+//
+// Each file is loaded only while it is being processed. What is kept for each color is the
+// sorted list of the SBWT positions of its finimizers, gap-encoded. The color matrix is filled
+// from those lists once the full set of finimizers is known.
 pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
     sbwt: &sbwt::SbwtIndex<sbwt::SubsetMatrix>,
     lcs: &sbwt::LcsArray,
@@ -275,57 +372,49 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
         .unwrap();
 
     let (finimizer_lengths, finimizer_matrix, global_length_counts) = thread_pool.install(|| {
-        log::info!("Reading input sequences into memory");
-        let input_stream = InputStream::new(filenames, reverse); // Read the data into memory again
-        let dbs = &input_stream.dbs;
         let sbwt_len = sbwt.n_sets();
-        let n_colors = dbs.len();
+        let n_colors = filenames.len();
 
         let index = StreamingIndex::new(sbwt, lcs);
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
-        let per_color_results: Vec<(BitVec, Vec<u32>)> = dbs
+        log::info!("Identifying finimizers");
+        let per_color_results: Vec<(Vec<u8>, Vec<u32>)> = filenames
             .par_iter()
             .enumerate()
-            .map(|(db_idx, db)| {
-                log::info!("Processing file {}/{}", db_idx + 1, dbs.len());
-                let mut this_color_finimizer_marks = bitvec![usize, Lsb0; 0; sbwt_len];
+            .map(|(db_idx, path)| {
+                log::info!("Processing file {}/{}", db_idx + 1, n_colors);
+                let db = load_db(path, reverse);
+                let mut this_color_colex_ranks = Vec::<usize>::new();
                 let mut unique_lengths: Vec<u32> = vec![0; k + 1];
                 let mut prev_colex: Option<usize> = None;
-                for rec in db.iter() {
-                    let seq = rec.seq;
-                    let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-                    for kmer_end in k..seq.len() + 1 {
-                        // Exclusive end
-                        if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
-                            continue;
-                        }
-
-                        let (len, colex, _) = pick_finimizer(&sus[(kmer_end - k)..kmer_end]);
-
+                for_each_finimizer(&index, &db, k, |len, colex| {
+                    // Same effect as always storing, without writing to shared memory needlessly
+                    if finimizer_lengths[colex].load(std::sync::atomic::Ordering::Relaxed) != len as u8 {
                         finimizer_lengths[colex]
                             .store(len as u8, std::sync::atomic::Ordering::Relaxed);
-                        this_color_finimizer_marks.set(colex, true);
-
-                        if Some(colex) != prev_colex {
-                            unique_lengths[len] += 1;
-                        }
-                        prev_colex = Some(colex);
                     }
-                }
+                    if Some(colex) != prev_colex {
+                        this_color_colex_ranks.push(colex);
+                        unique_lengths[len] += 1;
+                    }
+                    prev_colex = Some(colex);
+                });
+                drop(db);
 
-                (this_color_finimizer_marks, unique_lengths)
+                this_color_colex_ranks.sort_unstable();
+                this_color_colex_ranks.dedup();
+                (encode_increasing(&this_color_colex_ranks), unique_lengths)
             })
             .collect();
 
-        let per_color_bitmaps: Vec<BitVec> =
-            per_color_results.iter().map(|(bv, _)| bv.clone()).collect();
-
         let mut global_length_counts: Vec<u32> = vec![0; k + 1];
-        for (_, counts) in per_color_results {
+        let mut per_color_lists: Vec<Vec<u8>> = Vec::with_capacity(n_colors);
+        for (list, counts) in per_color_results {
             for (len, &count) in counts.iter().enumerate() {
                 global_length_counts[len] += count;
             }
+            per_color_lists.push(list);
         }
 
         // Convert atomic integers to regular integers. This seems to compile into a basically no-op.
@@ -345,34 +434,39 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
             }
         }
 
+        log::info!("Number of SBWT positions = {}", sbwt_len);
         log::info!("Number of finimizers = {}", n_finimizers);
         log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
+        log::info!(
+            "Per-color finimizer lists take {:.3} GB",
+            per_color_lists.iter().map(|l| l.len()).sum::<usize>() as f64 / 1e9
+        );
 
-        log::info!("Interleaving individual per-color marks");
+        let finimizer_rank = FinimizerRank::new(&finimizer_lengths);
+
         let total_n_bits = n_colors * n_finimizers;
         let total_n_words = total_n_bits.div_ceil(64);
+        log::info!(
+            "Filling the color matrix ({} colors x {} finimizers, {:.3} GB)",
+            n_colors,
+            n_finimizers,
+            (total_n_words * 8) as f64 / 1e9
+        );
         let finimizer_matrix: Vec<AtomicU64> =
             (0..total_n_words).map(|_| AtomicU64::new(0)).collect();
 
         let bar = indicatif::ProgressBar::new((n_colors) as u64);
-        (0..n_colors).into_par_iter().for_each(|color| {
-            let mut finimizer_idx = 0_usize;
-            for colex in 0..sbwt_len {
-                if finimizer_lengths[colex] > 0 {
-                    // This position is a finimizer
-                    let bit_idx = finimizer_idx * n_colors + color; // We want to set this bit
-                    let word_idx = bit_idx / 64;
-                    let word_offset = bit_idx % 64;
-                    let bit = per_color_bitmaps[color][colex];
-                    let mask = (1_u64 << word_offset) * bit as u64;
-
-                    finimizer_matrix[word_idx].fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
-                    finimizer_idx += 1;
-                }
-            }
-            bar.inc(1);
-            assert_eq!(finimizer_idx, n_finimizers);
-        });
+        per_color_lists
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(color, list)| {
+                decode_increasing(&list, |colex| {
+                    let bit_idx = finimizer_rank.rank(colex) * n_colors + color; // We want to set this bit
+                    finimizer_matrix[bit_idx / 64]
+                        .fetch_or(1_u64 << (bit_idx % 64), std::sync::atomic::Ordering::Relaxed);
+                });
+                bar.inc(1);
+            });
         bar.finish();
         log::info!("Color matrix finished");
 
@@ -462,8 +556,7 @@ pub fn verify_finimizer_colors(
     thread_pool.install(|| {
         paths.par_iter().enumerate().for_each(|(color, path)| {
             log::info!("Processing color {}", path.display());
-            let is = InputStream::new(&[path], reverse);
-            let db = is.dbs.first().unwrap(); // Also has reverse complements
+            let db = load_db(path, reverse); // Also has reverse complements
 
             // Mark all finimizers (in finimizer order, not sbwt colex order) in this color
             let mut finimizer_marks: BitVec = bitvec![0; n_finimizers];
@@ -764,68 +857,72 @@ impl ColoredFinimizers {
     }
 }
 
+// Loads one sequence file into memory, with the reverse complements of its sequences
+// appended after the forward sequences. If reverse is true, every sequence is reversed.
+fn load_db<P: AsRef<Path>>(path: P, reverse: bool) -> jseqio::seq_db::SeqDB {
+    let reader = jseqio::reader::DynamicFastXReader::from_file(&path).unwrap();
+    let (mut fw, rc) = reader.into_db_with_revcomp().unwrap();
+
+    if fw.sequence_count() == 0 {
+        panic!("No sequences found in file {}", path.as_ref().display());
+    }
+
+    // Append reverse complement records to the forward database
+    for rec in rc.iter() {
+        fw.push_record(rec);
+    }
+
+    if reverse {
+        for i in 0..fw.sequence_count() {
+            let rec = fw.get_mut(i);
+            rec.seq.reverse();
+            rec.qual.map(|q| q.reverse());
+            // Header is not reversed
+        }
+    }
+    fw
+}
+
+// Streams the sequences of the input files in order, holding one file in memory at a time.
 struct InputStream {
-    dbs: Vec<jseqio::seq_db::SeqDB>,
-    cur_db_idx: usize, // Index of the db currently being iterated over
-    seq_idx_in_cur_db: usize,
-    reverse: bool, // Reverse sequences (not complement)
+    paths: Vec<PathBuf>,
+    reverse: bool,                         // Reverse sequences (not complement)
+    next_path_idx: usize,                  // Index of the next file to load
+    cur_db: Option<jseqio::seq_db::SeqDB>, // The file currently being iterated over
+    seq_idx_in_cur_db: usize,              // Index of the next sequence to return from cur_db
 }
 
 impl InputStream {
     fn new<P: AsRef<Path>>(filenames: &[P], reverse: bool) -> InputStream {
-        let mut dbs: Vec<jseqio::seq_db::SeqDB> = vec![];
-        for path in filenames {
-            let reader = jseqio::reader::DynamicFastXReader::from_file(path).unwrap();
-            let (mut fw, rc) = reader.into_db_with_revcomp().unwrap();
-
-            if fw.sequence_count() == 0 {
-                panic!("No sequences found in file {}", path.as_ref().display());
-            }
-
-            // Append reverse complement records to the forward database
-            for rec in rc.iter() {
-                fw.push_record(rec);
-            }
-            dbs.push(fw);
-        }
-
-        if reverse {
-            log::info!("Reversing sequences");
-            for db in dbs.iter_mut() {
-                for i in 0..db.sequence_count() {
-                    let rec = db.get_mut(i);
-                    rec.seq.reverse();
-                    rec.qual.map(|q| q.reverse());
-                    // Header is not reversed
-                }
-            }
-        }
         Self {
-            dbs,
-            cur_db_idx: 0,
-            seq_idx_in_cur_db: 0,
+            paths: filenames.iter().map(|p| p.as_ref().to_path_buf()).collect(),
             reverse,
+            next_path_idx: 0,
+            cur_db: None,
+            seq_idx_in_cur_db: 0,
         }
     }
 }
 
 impl SeqStream for InputStream {
     fn stream_next(&mut self) -> Option<&[u8]> {
-        if self.cur_db_idx == self.dbs.len() {
-            return None; // Done
-        }
-
-        // Fetch the next sequence
-        let db = &self.dbs[self.cur_db_idx];
-        assert!(db.sequence_count() > 0);
-        let seq = db.get(self.seq_idx_in_cur_db).seq;
-
-        // Update the "cursor"
-        self.seq_idx_in_cur_db += 1;
-        if self.seq_idx_in_cur_db == db.sequence_count() {
-            self.cur_db_idx += 1;
+        // Move to the next file if the current one is exhausted
+        let exhausted = match &self.cur_db {
+            Some(db) => self.seq_idx_in_cur_db == db.sequence_count(),
+            None => true,
+        };
+        if exhausted {
+            if self.next_path_idx == self.paths.len() {
+                self.cur_db = None;
+                return None; // Done
+            }
+            self.cur_db = Some(load_db(&self.paths[self.next_path_idx], self.reverse));
+            self.next_path_idx += 1;
             self.seq_idx_in_cur_db = 0;
         }
+
+        let seq = self.cur_db.as_ref().unwrap().get(self.seq_idx_in_cur_db).seq;
+        self.seq_idx_in_cur_db += 1;
         Some(seq)
     }
 }
@@ -886,12 +983,9 @@ impl ColoredFinimizers {
         reverse: bool,
         sparse: bool,
     ) -> Self {
-        log::info!(
-            "Loading {} sequence files (colors) into memory",
-            filenames.len()
-        );
+        log::info!("Building for {} sequence files (colors)", filenames.len());
         let input_stream = InputStream::new(filenames, reverse);
-        let num_colors = input_stream.dbs.len();
+        let num_colors = filenames.len();
         log::info!("Building SBWT");
         let sbwt_builder = sbwt::SbwtIndexBuilder::new()
             .add_rev_comp(false) // Already added in the input stream
