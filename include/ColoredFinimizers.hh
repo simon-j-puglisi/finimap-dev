@@ -105,14 +105,11 @@ public:
         }
         else{
             int64_t n_bits = n_finimizers * n_colors;
-            // The bits are in u64 Lsb format
-            vector<uint64_t> words((n_bits + 63) / 64); // Ceil div by 64
-            in.read(reinterpret_cast<char *>(words.data()), words.size() * sizeof(uint64_t));
+            // The bits are in u64 Lsb format, which is also the layout of sdsl::bit_vector,
+            // so the words are read straight into it.
+            int64_t n_words = (n_bits + 63) / 64; // Ceil div by 64
             color_sets_concat.resize(n_bits);
-            for (int64_t i = 0; i < words.size(); i++)
-            {
-                color_sets_concat.set_int(i * 64, words[i]);
-            }
+            in.read(reinterpret_cast<char *>(color_sets_concat.data()), n_words * sizeof(uint64_t));
         }
         
 
@@ -247,21 +244,7 @@ public:
 
             cerr << "Deduplicate color sets" << endl;
             const uint64_t *data = cf.color_sets_concat.data();
-            sdsl::bit_vector bv(n_colors);
-            
-            map<sdsl::bit_vector, vector<size_t>> color_set_to_finimizers;
-            
-            for (size_t i = 0; i < n_finimizers; ++i)
-            {
-                read_colors_to_bv(data, n_colors, i, bv);
-                color_set_to_finimizers[bv].push_back(i);
-            }
-            
-            vector<pair<sdsl::bit_vector, vector<size_t>>> deduplicated_cs;
-            for (auto &[color_set, finimizer_indices] : color_set_to_finimizers)
-            {
-                deduplicated_cs.emplace_back(color_set, std::move(finimizer_indices));
-            }
+            vector<pair<sdsl::bit_vector, vector<size_t>>> deduplicated_cs = deduplicate_color_sets(data, n_colors, n_finimizers);
 
             cerr << "Unique color sets: " << deduplicated_cs.size() << endl;
 
@@ -310,6 +293,121 @@ public:
         // build prefix table using plen
         this->pt = std::move(PrefTab(long_fmins, plen));
 
+    }
+
+    // Returns the word_idx-th 64-bit word of the color set of the given finimizer.
+    // Color c of the set is bit c % 64 of word c / 64. Bits past the last color are zero.
+    static inline uint64_t color_set_word(const uint64_t *data, const uint64_t n_colors, const uint64_t finimizer, const uint64_t word_idx)
+    {
+        const uint64_t n_bits = std::min<uint64_t>(64, n_colors - word_idx * 64);
+        const uint64_t pos = finimizer * n_colors + word_idx * 64;
+        const uint64_t offset = pos % 64;
+        uint64_t word = data[pos / 64] >> offset;
+        if (offset + n_bits > 64)
+            word |= data[pos / 64 + 1] << (64 - offset);
+        if (n_bits < 64)
+            word &= (1ULL << n_bits) - 1;
+        return word;
+    }
+
+    // True if the color set of finimizer a is smaller than that of finimizer b, in the order of
+    // sdsl::bit_vector::operator<: the sets are compared color by color, and absent < present.
+    static inline bool color_set_less(const uint64_t *data, const uint64_t n_colors, const uint64_t a, const uint64_t b)
+    {
+        const uint64_t n_words = (n_colors + 63) / 64;
+        for (uint64_t w = 0; w < n_words; w++)
+        {
+            const uint64_t x = color_set_word(data, n_colors, a, w);
+            const uint64_t y = color_set_word(data, n_colors, b, w);
+            if (x != y)
+                return ((x >> __builtin_ctzll(x ^ y)) & 1) == 0;
+        }
+        return false;
+    }
+
+    static inline bool color_set_equal(const uint64_t *data, const uint64_t n_colors, const uint64_t a, const uint64_t b)
+    {
+        const uint64_t n_words = (n_colors + 63) / 64;
+        for (uint64_t w = 0; w < n_words; w++)
+        {
+            if (color_set_word(data, n_colors, a, w) != color_set_word(data, n_colors, b, w))
+                return false;
+        }
+        return true;
+    }
+
+    // Returns the distinct color sets in increasing order (the order of sdsl::bit_vector::operator<),
+    // each with the increasing list of the finimizers that have it.
+    // Finimizers are grouped by a hash of their color set, so that whole color sets are compared
+    // only to confirm that the sets of a group are equal, and to sort the distinct sets.
+    vector<pair<sdsl::bit_vector, vector<size_t>>> deduplicate_color_sets(const uint64_t *data, const uint64_t n_colors, const uint64_t n_finimizers)
+    {
+        const uint64_t n_words = (n_colors + 63) / 64;
+
+        // (hash of color set, finimizer), sorted
+        vector<pair<uint64_t, uint64_t>> hashed(n_finimizers);
+        for (uint64_t i = 0; i < n_finimizers; i++)
+        {
+            uint64_t h = 0x9E3779B97F4A7C15ULL;
+            for (uint64_t w = 0; w < n_words; w++)
+            {
+                h = (h ^ color_set_word(data, n_colors, i, w)) * 0xFF51AFD7ED558CCDULL;
+                h ^= h >> 32;
+            }
+            hashed[i] = {h, i};
+        }
+        std::sort(hashed.begin(), hashed.end());
+
+        // Split into groups of equal color sets: (first finimizer of the group, range in `hashed`)
+        struct Group { uint64_t first, begin, end; };
+        vector<Group> groups;
+        for (uint64_t run_begin = 0; run_begin < n_finimizers;)
+        {
+            uint64_t run_end = run_begin + 1;
+            bool all_equal = true;
+            while (run_end < n_finimizers && hashed[run_end].first == hashed[run_begin].first)
+            {
+                all_equal &= color_set_equal(data, n_colors, hashed[run_begin].second, hashed[run_end].second);
+                run_end++;
+            }
+            if (!all_equal)
+            {
+                // Different color sets with the same hash: order this run by color set, then finimizer
+                std::sort(hashed.begin() + run_begin, hashed.begin() + run_end,
+                          [&](const pair<uint64_t, uint64_t> &x, const pair<uint64_t, uint64_t> &y) {
+                              if (color_set_less(data, n_colors, x.second, y.second)) return true;
+                              if (color_set_less(data, n_colors, y.second, x.second)) return false;
+                              return x.second < y.second;
+                          });
+            }
+            for (uint64_t g_begin = run_begin; g_begin < run_end;)
+            {
+                uint64_t g_end = g_begin + 1;
+                while (g_end < run_end && (all_equal || color_set_equal(data, n_colors, hashed[g_begin].second, hashed[g_end].second)))
+                    g_end++;
+                groups.push_back({hashed[g_begin].second, g_begin, g_end});
+                g_begin = g_end;
+            }
+            run_begin = run_end;
+        }
+
+        std::sort(groups.begin(), groups.end(), [&](const Group &x, const Group &y) {
+            return color_set_less(data, n_colors, x.first, y.first);
+        });
+
+        vector<pair<sdsl::bit_vector, vector<size_t>>> deduplicated_cs;
+        deduplicated_cs.reserve(groups.size());
+        for (const Group &g : groups)
+        {
+            sdsl::bit_vector bv(n_colors, 0);
+            for (uint64_t w = 0; w < n_words; w++)
+                bv.set_int(w * 64, color_set_word(data, n_colors, g.first, w), std::min<uint64_t>(64, n_colors - w * 64));
+            vector<size_t> finimizer_indices(g.end - g.begin);
+            for (uint64_t j = g.begin; j < g.end; j++)
+                finimizer_indices[j - g.begin] = hashed[j].second;
+            deduplicated_cs.emplace_back(std::move(bv), std::move(finimizer_indices));
+        }
+        return deduplicated_cs;
     }
 
     void read_colors_to_bv(const uint64_t *data, const uint64_t n_colors, const uint64_t start, sdsl::bit_vector &bv)

@@ -65,6 +65,7 @@ public:
         const size_t sparse_thr = n_colors / 16;
         const size_t dense_thr = (n_colors * 15) / 16;
 
+        const size_t n_words = (n_colors + 63) / 64;
         for (auto &[bv, old_offsets] : deduplicated_cs)
         {
             const uint64_t start = old_offsets[0];
@@ -77,11 +78,11 @@ public:
             {
                 // store 1s explicitly
                 // TODO more efficient ?
-                for (size_t c = 0; c < n_colors; c++)
+                for (size_t w = 0; w < n_words; w++)
                 {
-                    if (bv[c])
+                    for (uint64_t word = bv.data()[w]; word != 0; word &= word - 1)
                     {
-                        L.push_back(static_cast<uint16_t>(c));
+                        L.push_back(static_cast<uint16_t>(w * 64 + __builtin_ctzll(word)));
                     }
                 }
                 // color set ids = rank in L
@@ -99,9 +100,10 @@ public:
                 const uint64_t old_offset = old_offsets[0] * n_colors;
                 // BV.resize(BV.size()+n_colors); // Resize BV every time.. not very efficient
                 BV_size++; // augment every time a new color set is added
-                for (size_t j = 0; j < n_colors; ++j)
+                for (size_t j = 0; j < n_colors; j += 64)
                 {
-                    temp_BV[new_offset + j] = bv[j];
+                    const uint8_t len = std::min<size_t>(64, n_colors - j);
+                    temp_BV.set_int(new_offset + j, bv.get_int(j, len), len);
                 }
 
                 // mark BV color set ids
@@ -116,11 +118,15 @@ public:
             else
             {
                 // very dense
-                for (size_t c = 0; c < n_colors; c++)
+                for (size_t w = 0; w < n_words; w++)
                 {
-                    if (!bv[c])
+                    const uint8_t len = std::min<size_t>(64, n_colors - w * 64);
+                    // The colors of this word that are absent from the set
+                    uint64_t word = ~bv.data()[w];
+                    if (len < 64) word &= (1ULL << len) - 1;
+                    for (; word != 0; word &= word - 1)
                     {
-                        temp_cL.push_back(static_cast<uint16_t>(c));
+                        temp_cL.push_back(static_cast<uint16_t>(w * 64 + __builtin_ctzll(word)));
                     }
                 }
                 // color set ids = rank in temp_cL
