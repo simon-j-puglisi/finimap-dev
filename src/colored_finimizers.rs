@@ -1,6 +1,7 @@
 use bytemuck::{cast_slice, Pod};
 use std::{
-    cmp::min,
+    cmp::{max, min},
+    collections::HashMap,
     io::Write,
     ops::DerefMut,
     path::{Path, PathBuf},
@@ -952,26 +953,124 @@ fn load_db<P: AsRef<Path>>(path: P, reverse: bool) -> jseqio::seq_db::SeqDB {
     fw
 }
 
-// Streams the sequences of the input files in order, holding one file in memory at a time.
-struct InputStream {
+// State shared between an InputStream and its loader threads.
+struct LoaderState {
+    next_to_load: usize,                           // Index of the next file a loader should take
+    next_to_consume: usize,                        // Index of the next file the stream will return
+    loaded: HashMap<usize, jseqio::seq_db::SeqDB>, // Files that are loaded and not yet consumed
+    failure: Option<String>,                       // Set if a loader failed
+    stop: bool,                                    // Set when the stream is dropped
+}
+
+struct Loader {
     paths: Vec<PathBuf>,
-    reverse: bool,                         // Reverse sequences (not complement)
-    next_path_idx: usize,                  // Index of the next file to load
+    reverse: bool,   // Reverse sequences (not complement)
+    window: usize,   // Loaders stay less than this many files ahead of the consumer
+    state: Mutex<LoaderState>,
+    changed: std::sync::Condvar,
+    load_ns: AtomicU64, // Thread-time spent reading and parsing files
+}
+
+impl Loader {
+    // Body of a loader thread: load files in index order, staying inside the window.
+    fn run(&self) {
+        loop {
+            let idx = {
+                let mut state = self.state.lock().unwrap();
+                loop {
+                    if state.stop || state.failure.is_some() || state.next_to_load == self.paths.len() {
+                        return;
+                    }
+                    if state.next_to_load < state.next_to_consume + self.window {
+                        break;
+                    }
+                    state = self.changed.wait(state).unwrap();
+                }
+                state.next_to_load += 1;
+                state.next_to_load - 1
+            };
+
+            let start = std::time::Instant::now();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                load_db(&self.paths[idx], self.reverse)
+            }));
+            add_elapsed(&self.load_ns, start);
+
+            let mut state = self.state.lock().unwrap();
+            match result {
+                Ok(db) => {
+                    state.loaded.insert(idx, db);
+                }
+                Err(_) => {
+                    state.failure = Some(format!("Could not load {}", self.paths[idx].display()));
+                }
+            }
+            self.changed.notify_all();
+        }
+    }
+}
+
+// Streams the sequences of the input files in order. The files are read and parsed by
+// background threads, a bounded number of files ahead of the one being streamed.
+struct InputStream {
+    loader: Arc<Loader>,
     cur_db: Option<jseqio::seq_db::SeqDB>, // The file currently being iterated over
     seq_idx_in_cur_db: usize,              // Index of the next sequence to return from cur_db
-    load_time: std::time::Duration,        // Time spent reading and parsing files so far
 }
 
 impl InputStream {
-    fn new<P: AsRef<Path>>(filenames: &[P], reverse: bool) -> InputStream {
-        Self {
+    fn new<P: AsRef<Path>>(filenames: &[P], reverse: bool, n_threads: usize) -> InputStream {
+        let n_threads = max(n_threads, 1);
+        let loader = Arc::new(Loader {
             paths: filenames.iter().map(|p| p.as_ref().to_path_buf()).collect(),
             reverse,
-            next_path_idx: 0,
+            window: 2 * n_threads,
+            state: Mutex::new(LoaderState {
+                next_to_load: 0,
+                next_to_consume: 0,
+                loaded: HashMap::new(),
+                failure: None,
+                stop: false,
+            }),
+            changed: std::sync::Condvar::new(),
+            load_ns: AtomicU64::new(0),
+        });
+        for _ in 0..n_threads {
+            let loader = Arc::clone(&loader);
+            std::thread::spawn(move || loader.run());
+        }
+        Self {
+            loader,
             cur_db: None,
             seq_idx_in_cur_db: 0,
-            load_time: std::time::Duration::ZERO,
         }
+    }
+
+    // Waits for the next file in order. Returns None when all files have been consumed.
+    fn next_db(&mut self) -> Option<jseqio::seq_db::SeqDB> {
+        let mut state = self.loader.state.lock().unwrap();
+        let idx = state.next_to_consume;
+        if idx == self.loader.paths.len() {
+            return None;
+        }
+        loop {
+            if let Some(message) = &state.failure {
+                panic!("{}", message);
+            }
+            if let Some(db) = state.loaded.remove(&idx) {
+                state.next_to_consume += 1;
+                self.loader.changed.notify_all();
+                return Some(db);
+            }
+            state = self.loader.changed.wait(state).unwrap();
+        }
+    }
+}
+
+impl Drop for InputStream {
+    fn drop(&mut self) {
+        self.loader.state.lock().unwrap().stop = true;
+        self.loader.changed.notify_all();
     }
 }
 
@@ -983,19 +1082,19 @@ impl SeqStream for InputStream {
             None => true,
         };
         if exhausted {
-            if self.next_path_idx == self.paths.len() {
-                if self.cur_db.take().is_some() {
-                    log::info!(
-                        "Reading the input files took {:.0} s of the time so far",
-                        self.load_time.as_secs_f64()
-                    );
+            let had_db = self.cur_db.take().is_some();
+            match self.next_db() {
+                Some(db) => self.cur_db = Some(db),
+                None => {
+                    if had_db {
+                        log::info!(
+                            "Reading the input files took {:.0} thread-seconds",
+                            self.loader.load_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
+                        );
+                    }
+                    return None; // Done
                 }
-                return None; // Done
             }
-            let start = std::time::Instant::now();
-            self.cur_db = Some(load_db(&self.paths[self.next_path_idx], self.reverse));
-            self.load_time += start.elapsed();
-            self.next_path_idx += 1;
             self.seq_idx_in_cur_db = 0;
         }
 
@@ -1062,7 +1161,7 @@ impl ColoredFinimizers {
         sparse: bool,
     ) -> Self {
         log::info!("Building for {} sequence files (colors)", filenames.len());
-        let input_stream = InputStream::new(filenames, reverse);
+        let input_stream = InputStream::new(filenames, reverse, n_threads);
         let num_colors = filenames.len();
         log::info!("Building SBWT");
         let sbwt_builder = sbwt::SbwtIndexBuilder::new()
