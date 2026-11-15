@@ -87,7 +87,9 @@ grep -v '^ *[0-9.]* *$' "$OUT/stage2.log" | cut -c 1-160 || true
 if [ -e "$OUT/idx.fmin" ]; then
     echo "--- output"
     ls -l "$OUT/idx.fmin"
-    if [ -n "$REF_FMIN" ]; then
+    if [ -n "$REF_FMIN" ] && [ ! -e "$REF_FMIN" ]; then
+        echo "FM_COMPARE skipped: reference not found: $REF_FMIN"
+    elif [ -n "$REF_FMIN" ]; then
         ls -l "$REF_FMIN"
         if cmp -s "$OUT/idx.fmin" "$REF_FMIN"; then
             echo "FM_COMPARE IDENTICAL to reference"

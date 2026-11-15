@@ -54,7 +54,9 @@ tr '\r' '\n' < "$OUT/stage1.log" | grep ' INFO ' | grep -v 'Processing file' || 
 if [ -e "$OUT/idx.cfm" ]; then
     echo "--- output"
     ls -l "$OUT/idx.cfm"
-    if [ -n "$REF_CFM" ]; then
+    if [ -n "$REF_CFM" ] && [ ! -e "$REF_CFM" ]; then
+        echo "FM_COMPARE skipped: reference not found: $REF_CFM"
+    elif [ -n "$REF_CFM" ]; then
         ls -l "$REF_CFM"
         if cmp -s "$OUT/idx.cfm" "$REF_CFM"; then
             echo "FM_COMPARE IDENTICAL to reference"
