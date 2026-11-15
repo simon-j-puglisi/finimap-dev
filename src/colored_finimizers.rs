@@ -259,25 +259,84 @@ pub fn identify_finimizers_sparse<P: AsRef<Path> + Send + Sync>(
     (finimizer_lengths, finimizer_matrix, lengths_by_freq)
 }
 
+// Thread-seconds spent in the parts of the finimizer search, summed over all threads.
+#[derive(Default)]
+struct SearchTimes {
+    load_ns: AtomicU64,   // Reading and parsing the input files
+    suffix_ns: AtomicU64, // Shortest unique suffix search in the SBWT
+    pick_ns: AtomicU64,   // Picking the finimizer of each k-mer
+}
+
+fn add_elapsed(counter: &AtomicU64, start: std::time::Instant) {
+    counter.fetch_add(
+        start.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 // Calls f(len, colex) for the finimizer of every k-mer of the sequences in db, in sequence order.
+//
+// The finimizer of a k-mer is its shortest unique substring, with ties broken by colex rank
+// (see pick_finimizer, which finds it by scanning the k-mer). Here the k-mers of a sequence are
+// handled together with a sliding window minimum: a shortest unique suffix of length len that
+// ends at position p lies inside the k-mers that end (exclusive) at p+1 ..= p+1-len+k, and
+// `candidates` holds those that can still be the minimum of some k-mer, smallest first.
 fn for_each_finimizer<F: FnMut(usize, usize)>(
     index: &StreamingIndex<'_, SbwtIndex<SubsetMatrix>, LcsArray>,
     db: &jseqio::seq_db::SeqDB,
     k: usize,
+    times: &SearchTimes,
     mut f: F,
 ) {
+    // (len, colex, last exclusive k-mer end that contains the candidate)
+    let mut candidates = std::collections::VecDeque::<(usize, usize, usize)>::new();
     for rec in db.iter() {
         let seq = rec.seq;
+        let start = std::time::Instant::now();
         let sus = index.shortest_freq_bound_suffixes(seq, 1); // Shortest unique suffixes
-        for kmer_end in k..seq.len() + 1 {
-            // Exclusive end
-            if !has_dna_alphabet(&seq[(kmer_end - k)..kmer_end]) {
+        add_elapsed(&times.suffix_ns, start);
+
+        let start = std::time::Instant::now();
+        candidates.clear();
+        let mut dna_run = 0_usize; // Number of consecutive DNA characters ending here
+        for (p, x) in sus.iter().enumerate() {
+            dna_run = if is_dna_char(seq[p]) { dna_run + 1 } else { 0 };
+
+            if let Some((len, range)) = x {
+                // A new candidate replaces the earlier ones that are not smaller,
+                // because it stays inside the k-mers for at least as long as they do.
+                while let Some(&(back_len, back_colex, _)) = candidates.back() {
+                    if (back_len, back_colex) >= (*len, range.start) {
+                        candidates.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                candidates.push_back((*len, range.start, p + 1 + k - len));
+            }
+
+            let kmer_end = p + 1; // Exclusive end
+            if kmer_end < k || dna_run < k {
                 continue;
             }
 
-            let (len, colex, _) = pick_finimizer(&sus[(kmer_end - k)..kmer_end]);
+            // The full k-mer should have an existing unique match
+            match x {
+                Some((_, range)) if range.len() == 1 => (),
+                _ => panic!("The k-mer ending at {} has no unique match", kmer_end),
+            }
+
+            while let Some(&(_, _, last_end)) = candidates.front() {
+                if last_end < kmer_end {
+                    candidates.pop_front();
+                } else {
+                    break;
+                }
+            }
+            let &(len, colex, _) = candidates.front().expect("Finimizer not found for kmer");
             f(len, colex);
         }
+        add_elapsed(&times.pick_ns, start);
     }
 }
 
@@ -379,16 +438,19 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
         let finimizer_lengths: Vec<AtomicU8> = (0..sbwt_len).map(|_| AtomicU8::new(0)).collect();
 
         log::info!("Identifying finimizers");
+        let times = SearchTimes::default();
         let per_color_results: Vec<(Vec<u8>, Vec<u32>)> = filenames
             .par_iter()
             .enumerate()
             .map(|(db_idx, path)| {
                 log::info!("Processing file {}/{}", db_idx + 1, n_colors);
+                let start = std::time::Instant::now();
                 let db = load_db(path, reverse);
+                add_elapsed(&times.load_ns, start);
                 let mut this_color_colex_ranks = Vec::<usize>::new();
                 let mut unique_lengths: Vec<u32> = vec![0; k + 1];
                 let mut prev_colex: Option<usize> = None;
-                for_each_finimizer(&index, &db, k, |len, colex| {
+                for_each_finimizer(&index, &db, k, &times, |len, colex| {
                     // Same effect as always storing, without writing to shared memory needlessly
                     if finimizer_lengths[colex].load(std::sync::atomic::Ordering::Relaxed) != len as u8 {
                         finimizer_lengths[colex]
@@ -434,6 +496,13 @@ pub fn identify_finimizers<P: AsRef<Path> + Send + Sync>(
             }
         }
 
+        let seconds = |x: &AtomicU64| x.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+        log::info!(
+            "Thread-seconds: reading input {:.0}, suffix search {:.0}, picking finimizers {:.0}",
+            seconds(&times.load_ns),
+            seconds(&times.suffix_ns),
+            seconds(&times.pick_ns)
+        );
         log::info!("Number of SBWT positions = {}", sbwt_len);
         log::info!("Number of finimizers = {}", n_finimizers);
         log::info!("Avg length = {}", total_length as f64 / n_finimizers as f64);
@@ -890,6 +959,7 @@ struct InputStream {
     next_path_idx: usize,                  // Index of the next file to load
     cur_db: Option<jseqio::seq_db::SeqDB>, // The file currently being iterated over
     seq_idx_in_cur_db: usize,              // Index of the next sequence to return from cur_db
+    load_time: std::time::Duration,        // Time spent reading and parsing files so far
 }
 
 impl InputStream {
@@ -900,6 +970,7 @@ impl InputStream {
             next_path_idx: 0,
             cur_db: None,
             seq_idx_in_cur_db: 0,
+            load_time: std::time::Duration::ZERO,
         }
     }
 }
@@ -913,10 +984,17 @@ impl SeqStream for InputStream {
         };
         if exhausted {
             if self.next_path_idx == self.paths.len() {
-                self.cur_db = None;
+                if self.cur_db.take().is_some() {
+                    log::info!(
+                        "Reading the input files took {:.0} s of the time so far",
+                        self.load_time.as_secs_f64()
+                    );
+                }
                 return None; // Done
             }
+            let start = std::time::Instant::now();
             self.cur_db = Some(load_db(&self.paths[self.next_path_idx], self.reverse));
+            self.load_time += start.elapsed();
             self.next_path_idx += 1;
             self.seq_idx_in_cur_db = 0;
         }
