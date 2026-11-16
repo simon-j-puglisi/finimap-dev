@@ -203,6 +203,7 @@ through the k-mers' finimizers.
 | `-o, --out-file` | FILE | stdout | Output filename. Or `.txt` file with output file list (one per line, paired with query list) |
 | `-t` | FLOAT | 0 | Threshold, a fraction from 0 to 1. A color is reported for a read if its score is at least `floor(t * found)`, and at least 1, where `found` is the number of the read's k-mers that have a finimizer in the index. With 0, every color with a score of at least 1 is reported |
 | `-b` | INT | 1000 | Number of reads handled together in a batch. It affects speed and memory, not the results |
+| `--threads` | INT | 1 | Number of threads. Each thread handles one batch at a time; the results and their order do not depend on it |
 | `-h, --help` | - | - | Display help message |
 
 ### Query files
@@ -228,7 +229,8 @@ Colors are assigned in the order references were listed in the original input fi
 
 ```color:score``` pairs are sorted by decreasing score, and by increasing color within a score.
 A read with no reported color gives a line with only its number. Progress messages go to
-standard error, so the output holds result lines only.
+standard error, so the output holds result lines only. At the end, standard error also gets a
+summary of the time spent loading the index and in each part of the search.
 
 ### Examples
 

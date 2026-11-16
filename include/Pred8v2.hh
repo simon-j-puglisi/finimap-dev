@@ -171,7 +171,6 @@ class Pred8v2 {
     //  first is the index of the predecessor in the set
     //  second is the length of the prefix (in bits) that key has with its predecessor
     pair<uint64_t, uint64_t> inline getPredPrefix(int64_t key) const{
-        _n_searches++;
         //cerr << "key: " << key << '\n';
         if(key < _min) {
             //cerr << "returning from 1\n";
@@ -205,7 +204,6 @@ class Pred8v2 {
         //cerr << "key>>8: " << (key>>8) << "_nblocks: " << _nblocks << '\n';
         if(x&1){
            //non-empty bucket
-           _n_hard_searches++;
            uint64_t y = x >> 2; //this is where, in _Y, the bucket elements are located
            //cerr << "Next bucket is empty? " << (1 - (_X[1+(key>>8)]&1)) << '\n';
            uint64_t bcount = ((_X[1+(key>>8)]>>2) + (1 - (_X[1+(key>>8)]&1))) - y;//_C[key>>8] + 1;
@@ -248,7 +246,6 @@ class Pred8v2 {
            return {y+bcount-1,lcp};
         }
         //the bucket that key belongs to is empty
-        _n_easy_searches++;
         uint64_t bk = key>>8;
         uint64_t bp = bk-1; //assume this is an empty bucket preceded by a non-empty bucket
         if(_X[bk] & 2){ //is that really the case?
@@ -314,9 +311,6 @@ class Pred8v2 {
    //  }
 
     //stats
-    mutable uint64_t _n_searches = 0;  
-    mutable uint64_t _n_easy_searches = 0;  
-    mutable uint64_t _n_hard_searches = 0;  
 
    private:
 

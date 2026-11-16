@@ -158,7 +158,6 @@ class PrefTab {
     }
 
     pair<int64_t, uint64_t> finiLookup(uint64_t key, uint64_t keylen) const{
-       _n_searches++;
        uint64_t preflenbits = _preflen<<1;
        //cerr << "preflenbits: " << preflenbits << '\n';
        uint64_t shift = 64-preflenbits;
@@ -169,13 +168,10 @@ class PrefTab {
        if(v&1){
           //cerr << "Empty bucket\n";
           //empty bucket
-          _n_easy_searches++;
-          _n_failed_searches++;
           return {-1,0};
        }
        //non-empty bucket
        //cerr << "Non-empty bucket\n";
-       _n_hard_searches++;
        v = v >> 1;
        //check if we are smaller than everything in our bucket
        if(((_F[v]>>preflenbits)<<preflenbits)>key){
@@ -236,7 +232,6 @@ class PrefTab {
        if(lcp >= el && el <= keylen){
           return {i,el};
        }
-       _n_failed_searches++;
        return {-1,0};
        //{i-(((_F[i]>>preflenbits)<<preflenbits)==key), (((_F[i]>>preflenbits)<<preflenbits)==key)};
     }
@@ -299,10 +294,6 @@ class PrefTab {
 
    
     //instrumenting statistics
-    mutable uint64_t _n_searches = 0;
-    mutable uint64_t _n_easy_searches = 0;
-    mutable uint64_t _n_hard_searches = 0;
-    mutable uint64_t _n_failed_searches = 0;
  
    private:
     uint64_t _preflen; //prefix length used for lookup table

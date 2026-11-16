@@ -127,7 +127,6 @@ class Fluke8 {
              return {p.first,_lengths[p.first]};
           }
        }
-       _n_failed_searches++;
        return {-1,0};
     }
 
@@ -197,7 +196,6 @@ class Fluke8 {
     }
 
     Pred8v2 _pred8;
-    mutable uint64_t _n_failed_searches = 0;
    private:
     uint64_t _u = 0;  // universe size
     uint64_t _n = 0;  // number of elements

@@ -13,6 +13,7 @@
 #   FM_REF_TIME  directory with the reference timings, finimap_query_NAME.txt (optional)
 #   FM_OUT       output directory (default: the current directory)
 #   FM_TAU       threshold (default 0.8)
+#   FM_THREADS   threads for search-fmin (default 1)
 #   FM_CMAKE_MODULE, FM_GCC_MODULE   as in stage2.sh
 set -euo pipefail
 export LC_ALL=C
@@ -24,11 +25,12 @@ REF_OUT=$(readlink -f "${FM_REF_OUT:?set FM_REF_OUT}")
 REF_TIME=${FM_REF_TIME:-}
 OUT=$(readlink -f "${FM_OUT:-$PWD}")
 TAU=${FM_TAU:-0.8}
+THREADS=${FM_THREADS:-1}
 JOBS=${SLURM_CPUS_PER_TASK:-4}
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
 
 echo "FM_QUERY_CHECK start host=$(hostname) date=$(date '+%F %T')"
-echo "repo=$REPO commit=$COMMIT index=$INDEX queries=$QUERIES ref_out=$REF_OUT out=$OUT tau=$TAU"
+echo "repo=$REPO commit=$COMMIT index=$INDEX queries=$QUERIES ref_out=$REF_OUT out=$OUT tau=$TAU threads=$THREADS"
 [ -e "$REPO/dev/timeit.py" ] || { echo "FM_ERROR repo not found at $REPO"; exit 1; }
 [ -s "$INDEX.fmin" ] || { echo "FM_ERROR index not found: $INDEX.fmin"; exit 1; }
 mkdir -p "$OUT"
@@ -48,7 +50,7 @@ for q in "$QUERIES"/*.fna; do
         echo "$name: already done"
     else
         python3 "$REPO/dev/timeit.py" "$OUT/$name.time.part" \
-            "$OUT/finimap" search-fmin -i "$INDEX" -q "$q" -o "$OUT/$name.txt.part" -t "$TAU" \
+            "$OUT/finimap" search-fmin -i "$INDEX" -q "$q" -o "$OUT/$name.txt.part" -t "$TAU" --threads "$THREADS" \
             > "$OUT/$name.stdout" 2> "$OUT/$name.stderr" \
             || { echo "FM_ERROR search-fmin failed on $name; end of its messages:"; tail -n 5 "$OUT/$name.stderr"; exit 1; }
         mv "$OUT/$name.txt.part" "$OUT/$name.txt"
@@ -128,6 +130,9 @@ for name in names:
         print("  read %d\n    ref: %s\n    new: %s" % (i, r, w))
 print("FM_QCHECK_TOTAL files=%d unexpected=%d" % (len(names), total_bad))
 PY
-echo "--- last messages of one run"
-tail -n 3 "$(ls "$OUT"/*.stderr | head -n 1)"
+echo "--- where the time went, per query file"
+for f in "$OUT"/*.stderr; do
+    echo "$(basename "$f" .stderr):"
+    grep -E '^(Time|Search time|Reads whose)' "$f" | sed 's/^/  /' || true
+done
 echo "FM_QUERY_CHECK_DONE"
