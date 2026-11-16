@@ -27,14 +27,19 @@ int build_fmin(int argc, char **argv)
     string out_prefix = opts["out-file"].as<string>();
 
     string indexfile = opts["index-file"].as<string>();
-    ColoredFinimizers cf;
-    ifstream in(indexfile);
-    cf.load(in);
     int64_t prefix_len = opts["p"].as<int64_t>();
     int64_t short_long_t = opts["x"].as<int64_t>();
 
     bool meta = opts["m"].as<bool>();
     int64_t k = opts["k"].as<int64_t>();
+    if (k < 1 || k > (int64_t)MAX_K)
+        throw std::runtime_error("k must be between 1 and " + std::to_string(MAX_K));
+
+    ColoredFinimizers cf;
+    ifstream in(indexfile, ios::binary);
+    if (!in)
+        throw std::runtime_error("Could not open " + indexfile);
+    cf.load(in);
 
     CompressedColoredFinimizers ccf(std::move(cf), prefix_len, short_long_t, k, meta); // Search currently works only with 31
 

@@ -37,6 +37,11 @@ void print_search_timing_stats()
               << duration_cast<milliseconds>(time_output).count() << " ms\n";
 }
 
+// Colors are stored as 16-bit numbers in the compressed color sets
+constexpr uint64_t MAX_COLORS = 65535;
+// Finimizers are looked up through 62-bit keys, two bits per character
+constexpr uint64_t MAX_K = 31;
+
 // Colored finimizers without much compression
 class ColoredFinimizers
 {
@@ -88,6 +93,10 @@ public:
 
         uint64_t n_colors;
         in.read(reinterpret_cast<char *>(&n_colors), sizeof(n_colors));
+        if (!in)
+            throw std::runtime_error("Could not read the finimizer matrix file");
+        if (n_colors > MAX_COLORS)
+            throw std::runtime_error("The input has " + to_string(n_colors) + " colors, but at most " + to_string(MAX_COLORS) + " are supported");
 
         lengths.resize(n_finimizers);
         in.read(reinterpret_cast<char *>(lengths.data()), n_finimizers * sizeof(uint8_t));
@@ -470,27 +479,6 @@ public:
 
 
 
-    void search_batch(const vector<std::string> &reads, const uint64_t query_len, const uint64_t batch_size, const uint64_t k, const float &t) const
-    {   
-        auto start = std::chrono::high_resolution_clock::now();
-        std::vector<std::pair<uint64_t, uint64_t>> batch_sorted;
-        batch_sorted.resize(batch_size*query_len);
-        batch_querying(reads, query_len, this->f8, this->pt, batch_size, this->CCS, this->n_colors, this->color_set_ids, k, t, batch_sorted);
-        auto end = std::chrono::high_resolution_clock::now();
-        time_rarest_fmin += (end - start);
-    }
-
-    void search_batch(const vector<std::string> &reads, const uint64_t query_len, const uint64_t batch_size, const uint64_t k) const
-    {    
-        auto start = std::chrono::high_resolution_clock::now();
-        // what should this output?
-        std::vector<std::pair<uint64_t, uint64_t>> batch_sorted;
-        batch_sorted.resize(batch_size*query_len);
-        batch_querying(reads, query_len, this->f8, this->pt, batch_size, this->CCS, this->n_colors, this->color_set_ids, k, batch_sorted);
-        auto end = std::chrono::high_resolution_clock::now();
-        time_rarest_fmin += (end - start);
-    }
-
     void serialize(const std::string &index_prefix) const
     {
         string filename = index_prefix + ".fmin";
@@ -526,32 +514,58 @@ public:
         std::ifstream in(filename, std::ios::binary);
         if (!in)
         {
-            cerr << "Error: Could not open file for reading: " << filename << endl;
-            return;
+            throw std::runtime_error("Could not open the index file " + filename);
         }
 
-        cerr << "Loading index from " << filename << endl;
+        // The file has no signature, so check what can be checked. A read past the end of
+        // the file raises an exception at once, before a half-read structure can be used.
+        try
+        {
+            in.exceptions(std::ios::failbit | std::ios::badbit | std::ios::eofbit);
+            cerr << "Loading index from " << filename << endl;
 
-        CCS.load(in);
+            CCS.load(in);
 
-        uint64_t color_set_ids_size;
-        in.read(reinterpret_cast<char *>(&color_set_ids_size), sizeof(uint64_t));
-        cerr << "color_set_ids_size: " << color_set_ids_size << endl; // Do we need this?
+            uint64_t color_set_ids_size;
+            in.read(reinterpret_cast<char *>(&color_set_ids_size), sizeof(uint64_t));
+            cerr << "color_set_ids_size: " << color_set_ids_size << endl; // Do we need this?
 
-        color_set_ids.resize(color_set_ids_size);
-        in.read(reinterpret_cast<char *>(color_set_ids.data()), color_set_ids_size * sizeof(uint64_t));
+            color_set_ids.resize(color_set_ids_size);
+            in.read(reinterpret_cast<char *>(color_set_ids.data()), color_set_ids_size * sizeof(uint64_t));
 
-        f8.load(in);
-        pt.load(in);
+            f8.load(in);
+            pt.load(in);
 
-        // metadata
-        in.read(reinterpret_cast<char *>(&n_colors), sizeof(n_colors));
-        //this->n_colors = 10000;
-        cerr << "n_colors: " << n_colors << endl;
-        in.read(reinterpret_cast<char *>(&n_finimizers), sizeof(n_finimizers));
-        cerr << "n_finimizers: " << n_finimizers << endl; // this is not needed
-        //in.read(reinterpret_cast<char *>(&plen), sizeof(plen));
-        in.read(reinterpret_cast<char *>(&k), sizeof(k));
+            // metadata
+            in.read(reinterpret_cast<char *>(&n_colors), sizeof(n_colors));
+            //this->n_colors = 10000;
+            cerr << "n_colors: " << n_colors << endl;
+            in.read(reinterpret_cast<char *>(&n_finimizers), sizeof(n_finimizers));
+            cerr << "n_finimizers: " << n_finimizers << endl; // this is not needed
+            //in.read(reinterpret_cast<char *>(&plen), sizeof(plen));
+            in.read(reinterpret_cast<char *>(&k), sizeof(k));
+
+            in.exceptions(std::ios::goodbit);
+        }
+        catch (const std::ios_base::failure &)
+        {
+            throw std::runtime_error(filename + " is not a complete Finimap index (the file ends too early)");
+        }
+        catch (const std::bad_alloc &)
+        {
+            throw std::runtime_error(filename + " is not a valid Finimap index");
+        }
+        catch (const std::length_error &)
+        {
+            throw std::runtime_error(filename + " is not a valid Finimap index");
+        }
+
+        if (in.peek() != std::ifstream::traits_type::eof())
+            throw std::runtime_error(filename + " is not a Finimap index (unexpected data after the end)");
+        if (n_colors == 0 || n_colors > MAX_COLORS)
+            throw std::runtime_error(filename + " is not a valid Finimap index (number of colors: " + to_string(n_colors) + ")");
+        if (k == 0 || k > MAX_K)
+            throw std::runtime_error(filename + " is not a valid Finimap index (k = " + to_string(k) + ")");
 
         in.close();
         cerr << "DONE" << endl;

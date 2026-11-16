@@ -1,632 +1,174 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <stdexcept>
 #include <string>
-#include <cstring>
-#include <unordered_map>
-#include <limits>
-
-#include <filesystem>
-#include <cstdio>
-#include <optional>
-#include <deque>
-
-#include "BoundedDeque.hh"
-#include "Colors_queries.hh"
-#include "Print_output_queries.hh"
-
-//#include "common.hh"
-//#include "bitsearch.hh"
-//#include "Buckets.hh"
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "Fluke8.hh"
 #include "PrefTab.hh"
 
-#include "sdsl/bit_vectors.hpp"
+// Finding the finimizers of a batch of reads.
+//
+// Every read is handled on its own, so the reads of a batch may have any lengths, and a read
+// may be shorter than k (it then has no k-mers). A character other than A, C, G, T (in either
+// case) breaks the read: no finimizer may span it, and a k-mer that contains it is skipped.
 
-void PickFinimizer(vector<int64_t> &Fmin, const uint64_t kmer_start, const uint64_t k, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &curr_candidates, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &next_candidates, tuple<uint64_t, uint64_t, uint64_t, uint64_t> &k_fmin, const uint64_t q){ //, const string& input){
-    if (!curr_candidates.empty())
+// Lookup keys hold this many characters, two bits each, starting from the top of a 64-bit word.
+constexpr uint64_t FINIMIZER_KEY_CHARS = 31;
+
+// The 2-bit code of a nucleotide, or 4 for any other character.
+inline uint8_t nucleotide_code(const char c)
+{
+    switch (c)
     {
-        k_fmin = curr_candidates.front();
-
-        Fmin.emplace_back(get<2>(k_fmin));
-    }
-    // else{ 
-    //     if (q == 0){cerr << "empty " << kmer_start << "-"<< kmer_start+k-1 << endl;}
-    // }
-
-    // Check if this finimizer is good for the next k-mer (still in the window)
-    // 1. start > current kmer_start
-    while (!curr_candidates.empty() && get<3>(curr_candidates.front()) <= kmer_start)
-    {   
-        curr_candidates.pop_front();
-    }
-    k_fmin = (curr_candidates.empty()) ? static_cast<tuple<uint64_t, uint64_t, uint64_t, uint64_t>>(make_tuple(k + 1, 0, 0, kmer_start + 1)) : curr_candidates.front();
-
-    // 2. end <= next end (kmer_start +k) 
-    if (!next_candidates.empty())
-    {   
-        // ending pos(start+len-1), len, rank, color_set_id[rank] ->  // len, rank, color_set_id[rank], start(i)
-
-        const auto &next_fmin = next_candidates.front(); // tuple<uint64_t, uint64_t, uint64_t, uint64_t>
-        if (get<0>(next_fmin) <= kmer_start+k) // kmer_start + k is the end of the next k-mer
-        { // end of the fmin is before end of next kmer
-            tuple<uint64_t, uint64_t, uint64_t, uint64_t> new_fmin = {get<1>(next_fmin), get<2>(next_fmin), get<3>(next_fmin),  get<0>(next_fmin) +1 - get<1>(next_fmin)};
-
-            if (new_fmin < k_fmin)
-            { // always true if curr_candidates is empty
-                curr_candidates.clear();
-                k_fmin = new_fmin;
-            }
-            else
-            {
-                while (!curr_candidates.empty() && curr_candidates.back() > new_fmin)
-                {
-                    curr_candidates.pop_back();
-                }
-            }
-            curr_candidates.push_back(new_fmin);
-            next_candidates.pop_front();
-        }
+    case 'A': case 'a': return 0;
+    case 'C': case 'c': return 1;
+    case 'G': case 'g': return 2;
+    case 'T': case 't': return 3;
+    default: return 4;
     }
 }
 
-void PickFinimizer(vector<int64_t> &Fmin, const uint64_t kmer_start, const uint64_t k, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &curr_candidates, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &next_candidates, tuple<uint64_t, uint64_t, uint64_t, uint64_t> &k_fmin){ //, const string& input){
-    if (!curr_candidates.empty())
+// Buffers that are reused from batch to batch.
+struct BatchWorkspace
+{
+    std::vector<uint64_t> read_start;                      // Offset of each read in the batch, plus one end offset
+    std::vector<uint8_t> max_len;                          // Per position: valid characters from there on, capped at k
+    std::vector<uint32_t> found;                           // Per position: 1 + rank of the finimizer starting there, or 0
+    std::vector<uint8_t> found_len;                        // Per position: length of that finimizer
+    std::vector<std::pair<uint64_t, uint32_t>> keys;       // (lookup key, position), in read order
+    std::vector<std::pair<uint64_t, uint32_t>> sorted_keys; // The same, grouped by the top 16 bits of the key
+    std::vector<int64_t> finimizers;                       // Color set ids of the finimizers of one read
+};
+
+// Looks up, for every position of every read, the finimizer that starts there, and then picks
+// the finimizer of every k-mer: the shortest one that lies inside the k-mer, ties broken by rank.
+// Handles reads[0 .. n_reads). Calls on_read(i, ids) for each read i in order, where ids holds the color set id of the
+// finimizer of each of the read's k-mers that has one (k-mers without a finimizer are left out).
+template <typename callback_t>
+void find_finimizers(const std::vector<std::string> &reads, const uint64_t n_reads, const Fluke8 &f8, const PrefTab &ptab,
+                     const std::vector<uint64_t> &color_set_ids, const uint64_t k,
+                     BatchWorkspace &ws, callback_t on_read)
+{
+    // Lay the reads out one after another
+    ws.read_start.clear();
+    uint64_t total = 0;
+    for (uint64_t ri = 0; ri < n_reads; ri++)
     {
-        k_fmin = curr_candidates.front();
-
-        Fmin.emplace_back(get<2>(k_fmin));
+        ws.read_start.push_back(total);
+        total += reads[ri].size();
     }
-    // else{cerr << "empty " << kmer_start << "-"<< kmer_start+k-1 << endl;}
+    ws.read_start.push_back(total);
+    if (total > UINT32_MAX)
+        throw std::runtime_error("A batch of reads is too long (over 4,294,967,295 characters)");
 
+    ws.max_len.assign(total, 0);
+    ws.found.assign(total, 0);
+    ws.found_len.assign(total, 0);
+    ws.keys.clear();
 
-    // Check if this finimizer is good for the next k-mer (still in the window)
-    // 1. start > current kmer_start
-    while (!curr_candidates.empty() && get<3>(curr_candidates.front()) <= kmer_start)
-    {   
-        curr_candidates.pop_front();
-    }
-    k_fmin = (curr_candidates.empty()) ? static_cast<tuple<uint64_t, uint64_t, uint64_t, uint64_t>>(make_tuple(k + 1, 0, 0, kmer_start + 1)) : curr_candidates.front();
-
-    // 2. end <= next end (kmer_start +k) 
-    if (!next_candidates.empty())
-    {   
-        // ending pos(start+len-1), len, rank, color_set_id[rank] ->  // len, rank, color_set_id[rank], start(i)
-
-        const auto &next_fmin = next_candidates.front(); // tuple<uint64_t, uint64_t, uint64_t, uint64_t>
-        if (get<0>(next_fmin) <= kmer_start+k) // kmer_start + k is the end of the next k-mer
-        { // end of the fmin is before end of next kmer
-            tuple<uint64_t, uint64_t, uint64_t, uint64_t> new_fmin = {get<1>(next_fmin), get<2>(next_fmin), get<3>(next_fmin),  get<0>(next_fmin) +1 - get<1>(next_fmin)};
-
-            if (new_fmin < k_fmin)
-            { // always true if curr_candidates is empty
-                curr_candidates.clear();
-                k_fmin = new_fmin;
-            }
-            else
-            {
-                while (!curr_candidates.empty() && curr_candidates.back() > new_fmin)
-                {
-                    curr_candidates.pop_back();
-                }
-            }
-            curr_candidates.push_back(new_fmin);
-            next_candidates.pop_front();
-        }
-    }
-}
-
-void AddFinimizer_first(const uint64_t rank, const uint64_t f_len, const uint64_t start, const uint64_t end, const vector<uint64_t> &color_set_ids, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &curr_candidates, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &next_candidates, tuple<uint64_t, uint64_t, uint64_t, uint64_t> &k_fmin){ //, const string& input){
-    if ((start + f_len)-1 > end)
-    {   
-        // ending pos, length, rank, color_set_id[rank]
-        next_candidates.push_back(make_tuple(start + f_len-1, f_len, rank, color_set_ids[rank]));
-    } // Sorted based on END
-    else
+    for (uint64_t ri = 0; ri < n_reads; ri++)
     {
-        tuple<uint64_t, uint64_t, uint64_t, uint64_t> new_fmin = {f_len, rank, color_set_ids[rank], start};
-        if (new_fmin < k_fmin)
-        {   
-            curr_candidates.clear();
-            k_fmin = new_fmin;
-        }
-        else
+        const std::string &r = reads[ri];
+        const uint64_t len = r.size();
+        if (len < k)
+            continue; // No k-mers
+        const uint64_t off = ws.read_start[ri];
+
+        // Number of valid characters starting at each position, capped at k
+        uint64_t run = 0;
+        for (uint64_t p = len; p-- > 0;)
         {
-            while (!curr_candidates.empty() && curr_candidates.back() > new_fmin)
+            run = (nucleotide_code(r[p]) < 4) ? std::min(run + 1, k) : 0;
+            ws.max_len[off + p] = run;
+        }
+
+        // The key of position p holds r[p .. p+30], padded with zeros past the end of the read
+        uint64_t key = 0;
+        for (uint64_t q = 0; q < len + FINIMIZER_KEY_CHARS - 1; q++)
+        {
+            const uint64_t code = (q < len) ? (nucleotide_code(r[q]) & 3) : 0;
+            key = (key << 2) | (code << 2);
+            if (q + 1 >= FINIMIZER_KEY_CHARS)
             {
-                curr_candidates.pop_back();
+                const uint64_t p = q + 1 - FINIMIZER_KEY_CHARS;
+                if (ws.max_len[off + p] > 0)
+                    ws.keys.push_back({key, static_cast<uint32_t>(off + p)});
             }
         }
-        curr_candidates.push_back(new_fmin);
     }
 
-}
-
-void AddFinimizer(const uint64_t rank, const uint64_t f_len, const uint64_t start, const vector<uint64_t> &color_set_ids, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &curr_candidates, BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> &next_candidates, tuple<uint64_t, uint64_t, uint64_t, uint64_t> &k_fmin){ //, const string& input){   
-    // ending pos, length, rank, color_set_id[rank]
-    next_candidates.push_back(make_tuple(start + f_len-1, f_len, rank, color_set_ids[rank]));
-}
-
-void FindFinimizers_naive (const vector<std::pair<uint64_t, uint64_t>> &batch, const uint64_t query_len, const CompressedColorSets &CCS, const uint64_t n_colors, const vector<uint64_t> &color_set_ids, uint64_t k, const float &t, uint64_t bi){
-    // TODO this assumes that all the queries have the same length 
-    const uint64_t batch_size = batch.size()/query_len;
-    // vector<int16_t> results(n_colors);
-
-    uint64_t q = 0;
-    // cerr << endl << bi << endl;
-    for (auto q_idx = 0; q_idx < batch_size; q_idx++){
-        vector<int64_t> Fmin;
-        Fmin.reserve(query_len - k + 1);        
-        uint64_t end = k-1; // start +k -1
-        for (auto start = 0; start < query_len -k +1; start++, end++){
-            // for every kmer check k values from start
-            tuple<uint64_t, uint64_t, uint64_t> k_fmin = {k + 1, 0, 0};
-            for (auto i = start; i <= end; i++){
-
-                uint64_t rank = (batch[i+q].second >> 32);  // extract upper 32 bits
-                
-                if (rank > 0) // 0 == -1
-                {   
-                    uint64_t f_len = batch[i+q].first;
-                    rank--; // 0 is a valid result 
-                    if (f_len + i -1 > end){
-                        break;
-                    }else{
-                        // length, rank, color_set_id[rank]
-                        tuple<uint64_t, uint64_t, uint64_t> curr_fmin = {f_len, rank, color_set_ids[rank]};
-                        if (curr_fmin < k_fmin){
-                            k_fmin = curr_fmin;
-                        }
-                    }
-                }
-                // else{
-                //     if (q == 0){cerr << "0,";}
-                // }
-            }
-            // if (q == 0){cerr << endl;}
-            // if (get<2>(k_fmin)==0){cerr << q << " get<2>(k_fmin): "<< get<2>(k_fmin)<< ", "<< get<0>(k_fmin) << endl;}
-            // if (q == 0 && get<0>(k_fmin) == 32 ){cerr << "empty: " << start << "-"<< end << endl;}
-            if (get<0>(k_fmin) <= k) {
-                Fmin.emplace_back(get<2>(k_fmin));
-            }
-        }
-        // if (q == 0){cerr << endl << endl;}
-    
-        // results.clear();
-        vector<int16_t> results(n_colors);
-
-        vector<pair<uint16_t, uint16_t>> ans;
-        int64_t T = pseudoalignment_stats_sorted(Fmin, CCS, n_colors, results, t, ans);
-        // auto start = std::chrono::system_clock::now(); 
-        print_cout_queries_sorted(ans,q_idx+bi, T);
-
-        // Not sorted
-        // int64_t T = pseudoalignment_stats(Fmin, CCS, n_colors, results, t);
-        // print_cout_queries(results,q_idx+bi, T);
-
-        q+=query_len;
-
+    // Group the keys by their top 16 bits, so that the lookups below touch memory in order
+    {
+        static thread_local std::vector<uint64_t> bucket_start;
+        bucket_start.assign(65536 + 1, 0);
+        for (const auto &e : ws.keys)
+            bucket_start[(e.first >> 48) + 1]++;
+        for (uint64_t i = 0; i < 65536; i++)
+            bucket_start[i + 1] += bucket_start[i];
+        ws.sorted_keys.resize(ws.keys.size());
+        for (const auto &e : ws.keys)
+            ws.sorted_keys[bucket_start[e.first >> 48]++] = e;
     }
 
-}
-
-void FindFinimizers (const vector<std::pair<uint64_t, uint64_t>> &batch, const uint64_t query_len, const CompressedColorSets &CCS, const uint64_t n_colors, const vector<uint64_t> &color_set_ids, uint64_t k, const float &t, uint64_t bi){
-    // TODO this assumes that all the queries have the same length 
-    const uint64_t batch_size = batch.size()/query_len;
-    
-    uint64_t q = 0;
-    for (auto q_idx = 0; q_idx < batch_size; q_idx++){
-        // length, rank, color_set_id[rank], start(i)
-        BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> curr_candidates(k); // sort based on len, int (color, start)
-        // ending pos, length, rank, color_set_id[rank]
-        BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> next_candidates(k); // sort by end (start+len-1)
-        tuple<uint64_t, uint64_t, uint64_t, uint64_t> k_fmin = {k + 1, 0, 0, 0};
-
-        
-        uint64_t end = k-1;
-
-        // NO decisions in this loop, not enough info
-        for (auto i = 0; i < k-1; i++){
-            uint64_t rank = (batch[i+q].second >> 32);  // extract upper 32 bits
-            
-            if (rank > 0) // 0 == -1
-            {   
-                uint64_t f_len = batch[i+q].first;
-                // {cerr << f_len << ",";}
-                rank--; // 0 is a valid result 
-                AddFinimizer_first(rank, f_len, i, end, color_set_ids, curr_candidates, next_candidates, k_fmin);
-            }
-            // else{
-            //     {cerr << "0,";}
-            //     }
-
+    // Finimizers in the prefix table have ranks after those in Fluke8
+    const uint64_t n_f8 = f8.getn();
+    for (const auto &[key, pos] : ws.sorted_keys)
+    {
+        const std::pair<int64_t, uint64_t> ret = ptab.finiLookup(key, ws.max_len[pos]);
+        if (ret.first >= 0)
+        {
+            ws.found[pos] = static_cast<uint32_t>(ret.first + 1 + n_f8);
+            ws.found_len[pos] = static_cast<uint8_t>(ret.second);
         }
-        // Now we have info on the first k-1 pos and we can make decisions
-        vector<int64_t> Fmin;
-        Fmin.reserve(query_len);
-        vector<int16_t> results(n_colors);
-        for (auto end = k-1; end < query_len; end++){
-            uint64_t rank = (batch[end+q].second >> 32);  // extract upper 32 bits
-            if (rank > 0) // 0 == -1
-            {   
-                uint64_t f_len = batch[end+q].first;
-                // {cerr << f_len << ",";}
-                rank--; // 0 is a valid result 
-                AddFinimizer(rank, f_len, end, color_set_ids, curr_candidates, next_candidates, k_fmin);
-            }
-            // else{
-            //     {cerr << "0,";}
-            //     }
-            PickFinimizer(Fmin, end-k+1, k, curr_candidates, next_candidates, k_fmin);
+    }
+    for (const auto &[key, pos] : ws.sorted_keys)
+    {
+        if (ws.found[pos] != 0)
+            continue;
+        const std::pair<int64_t, uint64_t> ret = f8.finiLookup(key, ws.max_len[pos]);
+        if (ret.first >= 0)
+        {
+            ws.found[pos] = static_cast<uint32_t>(ret.first + 1);
+            ws.found_len[pos] = static_cast<uint8_t>(ret.second);
         }
-        
-        // vector<pair<uint16_t, uint16_t>> ans;
-        // int64_t T = pseudoalignment_stats_sorted(Fmin, CCS, n_colors, results, t, ans);
-        // print_cout_queries_sorted(ans,q_idx+bi, T);
-        // Not sorted
-        // if (Fmin.size() != 970) cerr << Fmin.size()<< endl;
-        int64_t T = pseudoalignment_stats(Fmin, CCS, n_colors, results, t);
-        print_cout_queries(results,q_idx+bi, T);
-
-        q+=query_len;
-        // cerr << endl << endl;
-
     }
 
-}
-
-
-void FindFinimizers (const vector<std::pair<uint64_t, uint64_t>> &batch, const uint64_t query_len, const CompressedColorSets &CCS, const uint64_t n_colors, const vector<uint64_t> &color_set_ids, const uint64_t k, uint64_t bi){
-    // TODO this assumes that all the queries have the same length
-    const uint64_t batch_size = batch.size()/query_len;
-
-    uint64_t q = 0;
-    for (auto q_idx = 0; q_idx < batch_size; q_idx++){
-        // length, rank, color_set_id[rank], start(i)
-        BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> curr_candidates(k); // sort based on len, int (color, start)
-        // ending pos, length, rank, color_set_id[rank]
-        BoundedDeque<tuple<uint64_t, uint64_t, uint64_t, uint64_t>> next_candidates(k); // sort by end (start+len-1)
-        tuple<uint64_t, uint64_t, uint64_t, uint64_t> k_fmin = {k + 1, 0, 0, 0};
-
-        
-        uint64_t end = k-1;
-
-        // NO decisions in this loop, not enough info
-        for (auto i = 0; i < k-1; i++){
-            uint64_t rank = (batch[i+q].second >> 32);  // extract upper 32 bits
-            
-
-            if (rank > 0) // 0 == -1
-            {   
-                uint64_t f_len = batch[i+q].first;
-                rank--; // 0 is a valid result 
-                AddFinimizer_first(rank, f_len, i, end, color_set_ids, curr_candidates, next_candidates, k_fmin);
+    // Pick the finimizer of every k-mer
+    for (uint64_t ri = 0; ri < n_reads; ri++)
+    {
+        const uint64_t len = reads[ri].size();
+        const uint64_t off = ws.read_start[ri];
+        ws.finimizers.clear();
+        for (uint64_t start = 0; start + k <= len; start++)
+        {
+            if (ws.max_len[off + start] < k)
+                continue; // The k-mer contains a character that is not a nucleotide
+            const uint64_t end = start + k - 1;
+            // (length, rank) of the best finimizer so far
+            std::pair<uint64_t, uint64_t> best = {k + 1, 0};
+            for (uint64_t i = start; i <= end; i++)
+            {
+                if (ws.found[off + i] == 0)
+                    continue;
+                const uint64_t f_len = ws.found_len[off + i];
+                if (i + f_len - 1 > end)
+                    break; // It ends after the k-mer, and so does any finimizer that starts later
+                const std::pair<uint64_t, uint64_t> candidate = {f_len, ws.found[off + i] - 1};
+                if (candidate < best)
+                    best = candidate;
+            }
+            if (best.first <= k)
+            {
+                if (best.second >= color_set_ids.size())
+                    throw std::runtime_error("The index is inconsistent: a finimizer has no color set");
+                ws.finimizers.push_back(color_set_ids[best.second]);
             }
         }
-        // Now we have info on the first k-1 pos and we can make decisions
-        vector<int64_t> Fmin;
-        vector<int16_t> results(n_colors);
-        for (auto end = k-1; end < query_len; end++){
-            uint64_t rank = (batch[end+q].second >> 32);  // extract upper 32 bits
-            if (rank > 0) // 0 == -1
-            {   
-                uint64_t f_len = batch[end+q].first;
-                rank--; // 0 is a valid result 
-                AddFinimizer(rank, f_len, end, color_set_ids, curr_candidates, next_candidates, k_fmin);
-            }
-            PickFinimizer(Fmin, end-k+1, k, curr_candidates, next_candidates, k_fmin);
-        }
-        vector<pair<uint16_t, uint16_t>> ans;
-        pseudoalignment_stats_sorted(Fmin, CCS, n_colors, results, ans);
-        print_cout_queries_sorted(ans,q_idx+bi);
-        // Not sorted
-        // pseudoalignment_stats(Fmin, CCS, n_colors, results);
-        // print_cout_queries(results,q_idx+bi);
-           
-        q+=query_len;
+        on_read(ri, ws.finimizers);
     }
-
 }
-
-
-void batch_querying(const vector<std::string> &reads, const uint64_t query_len, const Fluke8 &f8, const PrefTab &ptab, const uint64_t batch_size, const CompressedColorSets &CCS, const uint64_t n_colors, const vector<uint64_t> &color_set_ids, const uint64_t k, const float &t, vector<std::pair<uint64_t, uint64_t>> &batch_sorted){
-    //do the querying
-    auto start = std::chrono::system_clock::now(); 
-        
-    uint64_t n_f8 = f8.getn();
-
-    uint64_t checksum = 0;
-    uint64_t checksum2 = 0;
-    std::vector<std::pair<uint64_t, uint64_t>> batch;
-    batch.reserve(batch_size*query_len);
-    uint64_t f8failedsearches = 0;
-    for(uint64_t bi=0; bi<reads.size(); bi+=batch_size){
-        // auto batch_start = std::chrono::high_resolution_clock::now();
-        
-        uint64_t batchend = std::min((uint64_t)(reads.size()),bi+batch_size);
-        batch.clear();
-        
-        // auto prepare_start = std::chrono::high_resolution_clock::now();
-        //prepare the batch
-        uint64_t bptr = 0;
-        for(uint64_t i=bi;i<batchend;i++){
-            std::string r = reads[i];
-            //cerr << r << '\n';
-            uint64_t packedr = 0;
-            for(uint64_t j=0; j<30; j++){
-                //pack a binary representation of the 31-mer into packedr
-                packedr |= ((uint64_t)char2bits(r[j])) << ((uint64_t)(2*(k-j)));
-            } 
-            for(uint64_t j=0; j<r.length()-30; j++){
-                //packedr |= (uint64_t)char2bits(r[j+30]);
-                packedr |= ((uint64_t)char2bits(r[j+30])<<(uint64_t)2);
-                batch.push_back({packedr,bptr+j});
-                //cerr << "X bptr: " << bptr+j <<'\n';
-                //int64_t ret = ptab.finiLookup(packedr);
-                //checksum += ret;
-                //if(ret != -1){
-                //   cerr << i << ": " << ret << '\n';
-                //}
-                //pair<int64_t,bool> res = ptab.getPred(packedr);
-                //cerr << packedr << ' ' << res.first << ' ' << res.second << '\n';
-                packedr = packedr << 2;
-                //cerr << "----------------------------\n";
-                //if (j > 3) exit(1);
-            }
-            //TODO: next loop makes k-mers with trailing A's overhanging the end of the read
-            for(uint64_t j=0; j<30; j++){
-                //cerr << "Y bptr: " << bptr+j+r.length()-30 <<'\n';
-                //cerr << "'K-mer starts at j: " << j+r.length()-30 << "\n";
-                //packedr |= (uint64_t)char2bits(r[j+30]);
-                packedr |= ((uint64_t)char2bits('A')<<(uint64_t)2);
-                batch.push_back({packedr,bptr+j+r.length()-30});
-                //cerr << packedr << '\n';
-                //int64_t ret = f8.finiLookup(packedr,30-j);
-                packedr = packedr << 2;
-                //cerr << "----------------------------\n";
-            }
-
-            bptr += r.length();
-        }
-        // auto prepare_end = std::chrono::high_resolution_clock::now();
-        // cerr << "Prepare batch: " << std::chrono::duration<double>(prepare_end - prepare_start).count() << "s" << endl;
-        //cerr << "bptr: "<<bptr<<" batch.size(): "<<batch.size()<<'\n';
-        //cerr<<"About tosort\n";
-        //sort the batch
-        //std::sort(batch.begin(),batch.end());
-
-        //partially sort the batch (bucket the elements in it based on prefix into 2^16 groups)
-        uint64_t C[65536];
-        for(uint64_t i=0;i<65536;i++) C[i] = 0;
-        for(uint64_t i=0;i<batch.size();i++){
-            C[batch[i].first>>48]++;
-        }
-        //cerr<<"Counting done\n";
-        uint64_t psum = 0;
-        for(uint64_t i=0;i<65536;i++){
-            uint64_t count = C[i];
-            C[i] = psum;
-            psum += count;
-            //cerr<<"psum: "<<psum<<"\n";
-        }
-        //cerr<<"Summing done\n";
-        for(uint64_t i=0;i<batch.size();i++){
-            uint64_t pos = C[batch[i].first>>48];
-            //cerr<<"pos: "<<pos<<"\n";
-            //cerr<<"batch[i].first>>48: "<<(batch[i].first>>48)<<"\n";
-            batch_sorted[pos]=batch[i];
-            C[batch[i].first>>48]++;
-        }
-        //cerr<<"Rearrangement done\n";
-
-        // auto sort_end = std::chrono::high_resolution_clock::now();
-        // cerr << "Sort batch: " << std::chrono::duration<double>(sort_end - sort_start).count() << "s" << endl;
-
-        // auto preftab_start = std::chrono::high_resolution_clock::now();
-        for(uint64_t i=0;i<batch.size();i++){
-            uint64_t len = query_len - (batch_sorted[i].second%query_len);
-            len = ((len >= k) ? k : len);
-            //cerr << "pos: " << (batch_sorted[i].second%1000) << " len: "<<len<<'\n';
-            pair<int64_t,uint64_t> ret = ptab.finiLookup(batch_sorted[i].first,len);
-            if ((uint64_t)(ret.first+1)>0){
-                batch_sorted[i].second = (((uint64_t)(ret.first+1+n_f8)) << 32) | batch_sorted[i].second;
-                batch_sorted[i].first = ret.second;
-            }
-            else{
-                batch_sorted[i].second = (((uint64_t)(ret.first+1)) << 32) | batch_sorted[i].second;
-            }
-            checksum += (ret.first+1);
-        }
-        // auto preftab_end = std::chrono::high_resolution_clock::now();
-        // cerr << "PrefTab lookups: " << std::chrono::duration<double>(preftab_end - preftab_start).count() << "s" << endl;
-
-        // auto fluke8_start = std::chrono::high_resolution_clock::now();
-        for(uint64_t i=0;i<batch.size();i++){
-            if(batch_sorted[i].second>>32 == 0){
-                uint64_t len = query_len - (batch_sorted[i].second%query_len);
-                //cerr << "pos: " << (batch_sorted[i].second%1000) << " len: "<<len<<'\n';
-                len = ((len >= k) ? k : len);
-                // ret is the rank of the finimap found
-                // todo add the number of short finimizers stored in f8  n_f8
-                
-                pair<int64_t,uint64_t> ret = f8.finiLookup(batch_sorted[i].first, len);
-                //cerr << "ret: "<<ret.first<<'\n';
-                batch_sorted[i].second = (((uint64_t)(ret.first+1)) << 32) | batch_sorted[i].second;
-                f8failedsearches += (ret.first == -1);
-                batch_sorted[i].first = ret.second;
-                checksum += (ret.first+1);
-                //cerr << "ret: "<<ret<<'\n';
-            
-            }
-        }
-        // auto fluke8_end = std::chrono::high_resolution_clock::now();
-        // cerr << "Fluke8 lookups: " << std::chrono::duration<double>(fluke8_end - fluke8_start).count() << "s" << endl;
-
-        // auto rearrange_start = std::chrono::high_resolution_clock::now();
-        for(uint64_t i=0;i<batch.size();i++){
-            batch[batch_sorted[i].second & 0xFFFFFFFF] = batch_sorted[i];
-            //int64_t ret = batch_sorted[i].first;
-        }
-        // auto rearrange_end = std::chrono::high_resolution_clock::now();
-        // cerr << "Rearrange batch: " << std::chrono::duration<double>(rearrange_end - rearrange_start).count() << "s" << endl;
-
-        auto finalize_start = std::chrono::high_resolution_clock::now();
-        // for(uint64_t i=0;i<batch.size();i++){
-        //     checksum2 += batch[i].second>>32;
-        //     //if(batch[i].second>>32){
-        //     //   cerr << "Found at: " << i << '\n';
-        //     //}
-        // }
-
-        // Identify correct finimizers for every pos
-        // FindFinimizers (batch, query_len, CCS, n_colors, color_set_ids, k, t, bi);
-        FindFinimizers_naive (batch, query_len, CCS, n_colors, color_set_ids, k, t, bi);
-        // auto finalize_end = std::chrono::high_resolution_clock::now();
-        // cerr << "FindFinimizers: " << std::chrono::duration<double>(finalize_end - finalize_start).count() << "s" << endl;
-
-        // auto batch_end = std::chrono::high_resolution_clock::now();
-        // cerr << "Total batch time: " << std::chrono::duration<double>(batch_end - batch_start).count() << "s" << endl << endl;
-    }
-    return;
-}
-
-void batch_querying(const vector<std::string> &reads, const uint64_t query_len, const Fluke8 &f8, const PrefTab &ptab, const uint64_t batch_size, const CompressedColorSets &CCS, const uint64_t n_colors, const vector<uint64_t> &color_set_ids, const uint64_t k, vector<std::pair<uint64_t, uint64_t>> &batch_sorted){
-    //do the querying
-    auto start = std::chrono::system_clock::now(); 
-        
-    uint64_t n_f8 = f8.getn();
-
-    uint64_t checksum = 0;
-    uint64_t checksum2 = 0;
-    std::vector<std::pair<uint64_t, uint64_t>> batch;
-    batch.reserve(batch_size*query_len);
-    uint64_t f8failedsearches = 0;
-    for(uint64_t bi=0; bi<reads.size(); bi+=batch_size){
-        uint64_t batchend = std::min((uint64_t)(reads.size()),bi+batch_size);
-        batch.clear();
-        //prepare the batch
-        uint64_t bptr = 0;
-        for(uint64_t i=bi;i<batchend;i++){
-            std::string r = reads[i];
-            //cerr << r << '\n';
-            uint64_t packedr = 0;
-            for(uint64_t j=0; j<30; j++){
-                //pack a binary representation of the 31-mer into packedr
-                packedr |= ((uint64_t)char2bits(r[j])) << ((uint64_t)(2*(k-j)));
-            } 
-            for(uint64_t j=0; j<r.length()-30; j++){
-                //packedr |= (uint64_t)char2bits(r[j+30]);
-                packedr |= ((uint64_t)char2bits(r[j+30])<<(uint64_t)2);
-                batch.push_back({packedr,bptr+j});
-                //cerr << "X bptr: " << bptr+j <<'\n';
-                //int64_t ret = ptab.finiLookup(packedr);
-                //checksum += ret;
-                //if(ret != -1){
-                //   cerr << i << ": " << ret << '\n';
-                //}
-                //pair<int64_t,bool> res = ptab.getPred(packedr);
-                //cerr << packedr << ' ' << res.first << ' ' << res.second << '\n';
-                packedr = packedr << 2;
-                //cerr << "----------------------------\n";
-                //if (j > 3) exit(1);
-            }
-            //TODO: next loop makes k-mers with trailing A's overhanging the end of the read
-            for(uint64_t j=0; j<30; j++){
-                //cerr << "Y bptr: " << bptr+j+r.length()-30 <<'\n';
-                //cerr << "'K-mer starts at j: " << j+r.length()-30 << "\n";
-                //packedr |= (uint64_t)char2bits(r[j+30]);
-                packedr |= ((uint64_t)char2bits('A')<<(uint64_t)2);
-                batch.push_back({packedr,bptr+j+r.length()-30});
-                //cerr << packedr << '\n';
-                //int64_t ret = f8.finiLookup(packedr,30-j);
-                packedr = packedr << 2;
-                //cerr << "----------------------------\n";
-            }
-
-            bptr += r.length(); //-31;
-        }
-        //cerr << "bptr: "<<bptr<<" batch.size(): "<<batch.size()<<'\n';
-        //cerr<<"About tosort\n";
-        //sort the batch
-        //std::sort(batch.begin(),batch.end());
-
-        //partially sort the batch (bucket the elements in it based on prefix into 2^16 groups) --- much faster than sorting
-        batch_sorted.reserve(batch.size());
-        uint64_t C[65536];
-        for(uint64_t i=0;i<65536;i++) C[i] = 0;
-        for(uint64_t i=0;i<batch.size();i++){
-            C[batch[i].first>>48]++;
-        }
-        //cerr<<"Counting done\n";
-        uint64_t psum = 0;
-        for(uint64_t i=0;i<65536;i++){
-            uint64_t count = C[i];
-            C[i] = psum;
-            psum += count;
-            //cerr<<"psum: "<<psum<<"\n";
-        }
-        //cerr<<"Summing done\n";
-        for(uint64_t i=0;i<batch.size();i++){
-            uint64_t pos = C[batch[i].first>>48];
-            //cerr<<"pos: "<<pos<<"\n";
-            //cerr<<"batch[i].first>>48: "<<(batch[i].first>>48)<<"\n";
-            batch_sorted[pos]=batch[i];
-            C[batch[i].first>>48]++;
-        }
-        //cerr<<"Rearrangement done\n";
-
-        //cerr << "Before ptab loop\n";
-        for(uint64_t i=0;i<batch.size();i++){
-            uint64_t len = query_len - (batch_sorted[i].second%query_len);
-            len = ((len >= k) ? k : len);
-            //cerr << "pos: " << (batch_sorted[i].second%1000) << " len: "<<len<<'\n';
-            //cerr << "rpos: " << (batch_sorted[i].second%1000)<<'\n';
-            pair<int64_t,uint64_t> ret = ptab.finiLookup(batch_sorted[i].first,len);
-            //cerr << "ret: "<<ret.first<<' '<<ret.second<<'\n';
-            //cerr << "flen: "<<ret.second<<'\n';
-            if ((uint64_t)(ret.first+1)>0){
-                batch_sorted[i].second = (((uint64_t)(ret.first+1+n_f8)) << 32) | batch_sorted[i].second;
-                batch_sorted[i].first = ret.second;
-            }
-            else{
-                batch_sorted[i].second = (((uint64_t)(ret.first+1)) << 32) | batch_sorted[i].second;
-            }
-            checksum += (ret.first+1);
-        }
-        //cerr << "Before f8 loop\n";
-        for(uint64_t i=0;i<batch.size();i++){
-            if(batch_sorted[i].second>>32 == 0){
-                uint64_t len = query_len - (batch_sorted[i].second%query_len);
-                //cerr << "pos: " << (batch_sorted[i].second%1000) << " len: "<<len<<'\n';
-                len = ((len >= k) ? k : len);
-                // ret is the rank of the finimap found
-                // todo add the number of short finimizers stored in f8  n_f8
-                
-                pair<int64_t,uint64_t> ret = f8.finiLookup(batch_sorted[i].first, len);
-                //cerr << "ret: "<<ret.first<<' '<<ret.second<<'\n';
-                //cerr << "ret: "<<ret.first<<'\n';
-                batch_sorted[i].second = (((uint64_t)(ret.first+1)) << 32) | batch_sorted[i].second;
-                f8failedsearches += (ret.first == -1);
-                batch_sorted[i].first = ret.second;
-                checksum += (ret.first+1);
-                //cerr << "ret: "<<ret<<'\n';
-            
-            }
-        }
-        for(uint64_t i=0;i<batch.size();i++){
-            batch[batch_sorted[i].second & 0xFFFFFFFF] = batch_sorted[i];
-            //int64_t ret = batch_sorted[i].first;
-        }
-        // for(uint64_t i=0;i<batch.size();i++){
-        //     checksum2 += batch[i].second>>32;
-        //     //if(batch[i].second>>32){
-        //     //   cerr << "Found at: " << i << '\n';
-        //     //}
-        // }
-
-        // Identify correct finimizers for every pos
-        FindFinimizers (batch, query_len, CCS, n_colors, color_set_ids, k, bi);
-    }
-    return;
-}
-

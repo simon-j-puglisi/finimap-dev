@@ -8,7 +8,7 @@
 
 using namespace std;
 
-inline void process_word(uint64_t word, const uint64_t base, vector<int16_t> &results, const uint64_t freq)
+inline void process_word(uint64_t word, const uint64_t base, vector<int32_t> &results, const uint64_t freq)
 {
     while (word)
     {
@@ -19,7 +19,7 @@ inline void process_word(uint64_t word, const uint64_t base, vector<int16_t> &re
     }
 }
 
-inline void read_bv(const uint64_t *data, const uint64_t start, const uint64_t freq, const uint64_t n_colors, vector<int16_t> &results)
+inline void read_bv(const uint64_t *data, const uint64_t start, const uint64_t freq, const uint64_t n_colors, vector<int32_t> &results)
 {
 
     const uint64_t *ptr = data + (start * n_colors) / 64;
@@ -60,7 +60,7 @@ inline void read_bv(const uint64_t *data, const uint64_t start, const uint64_t f
 }
 
 
-void read_verydense(const int64_t pos, const uint64_t freq, const DeltaSet &EF, const vector<uint16_t> &L, const uint64_t n_colors, vector<int16_t> &results, uint16_t &dense)
+void read_verydense(const int64_t pos, const uint64_t freq, const DeltaSet &EF, const vector<uint16_t> &L, const uint64_t n_colors, vector<int32_t> &results, uint32_t &dense)
 {
     dense += freq;
     const size_t end = EF.get_start(pos); // exclusive end
@@ -71,7 +71,7 @@ void read_verydense(const int64_t pos, const uint64_t freq, const DeltaSet &EF, 
     }
 }
 
-void read_colors(const CompressedColorSets &CCS, const uint64_t n_colors, vector<int16_t> &results, const vector<pair<int64_t, uint64_t>> &fmin_v, uint16_t &dense)
+void read_colors(const CompressedColorSets &CCS, const uint64_t n_colors, vector<int32_t> &results, const vector<pair<int64_t, uint64_t>> &fmin_v, uint32_t &dense)
 {
     const sdsl::bit_vector &BV = CCS.getBV();
     const uint64_t *data = BV.data();
@@ -130,206 +130,35 @@ void read_colors(const CompressedColorSets &CCS, const uint64_t n_colors, vector
     }
 }
 
-void counting_sort(const vector<int16_t> &results, vector<pair<uint16_t, uint16_t>> &ans, const size_t found_fmin, const uint16_t n_colors)
+// Counts, for every color, how many of a read's finimizers have that color.
+// color_set_ids holds the color set id of the finimizer of each k-mer; it is sorted in place.
+// results gets one count per color.
+inline void count_colors(vector<int64_t> &color_set_ids, const CompressedColorSets &CCS, const uint64_t n_colors,
+                         vector<int32_t> &results, vector<pair<int64_t, uint64_t>> &runs)
 {
-    vector<uint16_t> counts(found_fmin + 1);
-
-    for (size_t idx = 0; idx < n_colors; idx++)
-    {
-        counts[results[idx]]++;
-    }
-
-    // Cumulative Sums
-    for (size_t c = 1; c < counts.size(); c++)
-    {
-        counts[c] += counts[c - 1];
-    }
-
-    ans.resize(n_colors);
-    for (size_t idx = 0; idx < n_colors; idx++)
-    {
-        ans[counts[results[idx]] - 1] = {static_cast<uint16_t>(idx), results[idx]};
-        counts[results[idx]]--;
-    }
-}
-
-inline void pseudoalignment_stats(vector<int64_t> &Fmin, const CompressedColorSets &CCS, const uint64_t n_colors, vector<int16_t> &results)
-{
-    // vector<int16_t> results(n_colors, 0);
-    /* if (results.size() != n_colors) {
-        results.assign(n_colors, 0);
-    } else {
-        std::fill(results.begin(), results.end(), 0);
-    }
- */
-    if (Fmin.empty())
-    {
+    results.assign(n_colors, 0);
+    if (color_set_ids.empty())
         return;
-    } // not 0 as everything wuold be >=
 
-    std::fill(results.begin(), results.end(), 0);
-
-    std::sort(Fmin.begin(), Fmin.end());
-    vector<pair<int64_t, uint64_t>> fmin_v;
-    fmin_v.reserve(Fmin.size());
-
-    for (size_t i = 0; i < Fmin.size();)
+    // Each distinct color set once, with its number of occurrences
+    std::sort(color_set_ids.begin(), color_set_ids.end());
+    runs.clear();
+    for (size_t i = 0; i < color_set_ids.size();)
     {
         size_t j = i + 1;
-        while (j < Fmin.size() && Fmin[j] == Fmin[i])
+        while (j < color_set_ids.size() && color_set_ids[j] == color_set_ids[i])
             ++j;
-        fmin_v.emplace_back(Fmin[i], j - i);
+        runs.emplace_back(color_set_ids[i], j - i);
         i = j;
     }
 
-    /* // Count freq of each fmin
-    std::unordered_map<int64_t, uint64_t> fmin_counts;
-    for (auto v : Fmin) {
-        fmin_counts[v]++;
-    }
-
-    // vector for sorted output so that it is possible to scan color_set_concat
-    vector<pair<int64_t, uint64_t>> fmin_v(fmin_counts.begin(), fmin_counts.end());
-    std::sort(fmin_v.begin(), fmin_v.end()); */
-    uint16_t dense = 0;
-    read_colors(CCS, n_colors, results, fmin_v, dense);
-    // TODO keep track of which counters were incremented and set to zero only those
-    // Add number of dense sets
-    for (auto &r : results)
+    // Very dense sets are stored as their complement: `dense` counts the finimizers with such
+    // a set, and the colors missing from each have already been subtracted in results.
+    uint32_t dense = 0;
+    read_colors(CCS, n_colors, results, runs, dense);
+    if (dense != 0)
     {
-        r += dense;
+        for (auto &r : results)
+            r += dense;
     }
-    return;
 }
-
-inline int16_t pseudoalignment_stats(vector<int64_t> &Fmin, const CompressedColorSets &CCS, const uint64_t n_colors, vector<int16_t> &results, const float t)
-{ // vector<uint64_t>& results,
-    if (Fmin.empty())
-    {
-        return 1;
-    } // not 0 as everything wuold be >=
-
-    std::fill(results.begin(), results.end(), 0);
-
-    std::sort(Fmin.begin(), Fmin.end());
-    vector<pair<int64_t, uint64_t>> fmin_v;
-    fmin_v.reserve(Fmin.size());
-
-    for (size_t i = 0; i < Fmin.size();)
-    {
-        size_t j = i + 1;
-        while (j < Fmin.size() && Fmin[j] == Fmin[i])
-            ++j;
-        fmin_v.emplace_back(Fmin[i], j - i);
-        i = j;
-    }
-
-    // Check the values above the minimum in search
-    const size_t found_fmin = Fmin.size(); // # total finimizers
-    int16_t T = found_fmin * t;
-    uint16_t dense = 0;
-
-    read_colors(CCS, n_colors, results, fmin_v, dense);
-
-    // If we care about the number of matches, add number of dense sets
-    for (auto& r: results){r+=dense;}
-
-    // adjust T
-    // T -= dense;
-    //for (auto& r :results){ r+= dense;}
-    return T;
-}
-
-inline void pseudoalignment_stats_sorted(vector<int64_t> &Fmin, const CompressedColorSets &CCS, const uint64_t n_colors, vector<int16_t> &results,     vector<pair<uint16_t, uint16_t>> &ans)
-{
-    // vector<int16_t> results(n_colors, 0);
-    /* if (results.size() != n_colors) {
-        results.assign(n_colors, 0);
-    } else {
-        std::fill(results.begin(), results.end(), 0);
-    }
- */
-    if (Fmin.empty())
-    {
-        return;
-    } // not 0 as everything wuold be >=
-
-    std::fill(results.begin(), results.end(), 0);
-
-    std::sort(Fmin.begin(), Fmin.end());
-    vector<pair<int64_t, uint64_t>> fmin_v;
-    fmin_v.reserve(Fmin.size());
-
-    for (size_t i = 0; i < Fmin.size();)
-    {
-        size_t j = i + 1;
-        while (j < Fmin.size() && Fmin[j] == Fmin[i])
-            ++j;
-        fmin_v.emplace_back(Fmin[i], j - i);
-        i = j;
-    }
-
-    /* // Count freq of each fmin
-    std::unordered_map<int64_t, uint64_t> fmin_counts;
-    for (auto v : Fmin) {
-        fmin_counts[v]++;
-    }
-
-    // vector for sorted output so that it is possible to scan color_set_concat
-    vector<pair<int64_t, uint64_t>> fmin_v(fmin_counts.begin(), fmin_counts.end());
-    std::sort(fmin_v.begin(), fmin_v.end()); */
-    uint16_t dense = 0;
-    read_colors(CCS, n_colors, results, fmin_v, dense);
-    // TODO keep track of which counters were incremented and set to zero only those
-    // Add number of dense sets
-    for (auto &r : results)
-    {
-        r += dense;
-    }
-    const size_t found_fmin = Fmin.size(); // # total finimizers
-    // Sort results so that the output is sorted
-    counting_sort(results, ans, found_fmin, n_colors);
-    return;
-}
-
-
-inline int16_t pseudoalignment_stats_sorted(vector<int64_t> &Fmin, const CompressedColorSets &CCS, const uint64_t n_colors, vector<int16_t> &results, const float t, vector<pair<uint16_t, uint16_t>> &ans)
-{
-    if (Fmin.empty())
-    {
-        return 1;
-    } // not 0 as everything wuold be >=
-
-    std::fill(results.begin(), results.end(), 0);
-
-    std::sort(Fmin.begin(), Fmin.end());
-    vector<pair<int64_t, uint64_t>> fmin_v;
-    fmin_v.reserve(Fmin.size());
-
-    for (size_t i = 0; i < Fmin.size();)
-    {
-        size_t j = i + 1;
-        while (j < Fmin.size() && Fmin[j] == Fmin[i])
-            ++j;
-        fmin_v.emplace_back(Fmin[i], j - i);
-        i = j;
-    }
-
-    // Check the values above the minimum in search
-    const size_t found_fmin = Fmin.size(); // # total finimizers
-    int16_t T = found_fmin * t;
-    uint16_t dense = 0;
-
-    read_colors(CCS, n_colors, results, fmin_v, dense);
-
-    // If we care about the number of matches, add number of dense sets
-    for (auto& r: results){r+=dense;}
-
-    // adjust T
-    // T -= dense;
-    //for (auto& r :results){ r+= dense;}
-    //  Sort results so that the output is sorted
-    counting_sort(results, ans, found_fmin, n_colors);
-    return T;
-}
-

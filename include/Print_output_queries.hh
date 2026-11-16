@@ -1,163 +1,93 @@
 #pragma once
 
+#include <charconv>
+#include <cstdint>
+#include <ostream>
+#include <stdexcept>
 #include <string>
-#include <cstring>
+#include <utility>
+#include <vector>
 
-#include <filesystem>
-#include <cstdio>
-//#include <optional>
-//#include <variant>
-#include <sstream>
+// Writes result lines to a stream through a buffer.
+//
+// One line per read: the read's number (from 0, in input order), then "color:score" for each
+// reported color, by decreasing score and then increasing color. Every field is followed by
+// a space.
+class ResultWriter
+{
+    std::ostream &out;
+    std::string buffer;
+    std::vector<uint64_t> bucket_start;
+    std::vector<std::pair<uint32_t, uint32_t>> ordered; // (color, score)
 
-#include "SeqIO.hh"
-
-using namespace std;
-
-// template <typename out_stream_t>
-// void write_out(const char *data, int64_t data_length, out_stream_t &output_writer, vector<char> &buffer, const size_t flush_t = 8 * 1024 * 1024)
-// { // TODO find a better way to write threshold
-//     for (int64_t i = 0; i < data_length; i++)
-//     {
-//         buffer.push_back(data[i]);
-//         if (buffer.size() > flush_t && data[i] == '\n')
-//         {
-//             output_writer.write(buffer.data(), buffer.size());
-//             buffer.clear(); // Let's hope this keeps the reserved capacity of the vector intact
-//         }
-//     }
-// }
-
-// uint16_t fast_int_to_string(uint16_t x, char *buffer)
-// {
-//     uint16_t i = 0;
-//     // Write the digits in reverse order (reversed back at the end)
-//     do
-//     {
-//         buffer[i++] = '0' + (x % 10);
-//         x /= 10;
-//     } while (x > 0);
-//     std::reverse(buffer, buffer + i);
-//     buffer[i] = '\0';
-//     return i;
-// }
-
-// void print_out_queries(const vector<int16_t> results, const uint16_t q_id, const float t){
-//     constexpr size_t flush_t = 8 * 1024 * 1024; // 8 MB //1 << 20; // 1MB
-
-//     std::vector<char> output_buffer;
-//     output_buffer.reserve(flush_t * 2);
-
-//     // For output writing
-//     char int_buf[32]; // Enough space for a 64-bit integer in ascii
-
-//     if (t > 0){
-
-//     }
-//     else
-//     {
-//         auto start = std::chrono::high_resolution_clock::now();
-//         for (auto idx = 0; idx < results.size(); idx++)
-//         {
-//             const auto &count = results[idx];
-//             if (count > 0)
-//             {
-//                 uint16_t idx_len = fast_int_to_string(idx, int_buf);
-//                 write_out(int_buf, idx_len, out, output_buffer, flush_t);
-//                 // write_out(" ", 1, out, output_buffer, flush_t);
-
-//                 // print the number of kmers/matches found
-//                 write_out(":", 1, out, output_buffer, flush_t);
-
-//                 uint16_t count_len = fast_int_to_string(count, int_buf);
-//                 write_out(int_buf, count_len, out, output_buffer, flush_t);
-
-//                 write_out(" ", 1, out, output_buffer, flush_t);
-//             }
-//         }
-//         /* for (int a = static_cast<int>(ans.size()) - 1; a >= 0; a--)
-//         {
-//             const auto &[idx, count] = ans[a];
-//             if (count >= 0)
-//             {
-//                 uint16_t idx_len = fast_int_to_string(idx, int_buf);
-//                 write_out(int_buf, idx_len, out, output_buffer, flush_t);
-//                 write_out(" ", 1, out, output_buffer, flush_t);
-//             }
-//         } */
-
-//         write_out("\n", 1, out, output_buffer, flush_t);
-
-//         auto end = std::chrono::high_resolution_clock::now();
-//         //time_output += (end - start);
-//     }
-    
-    
-
-// }
-
-void print_cout_queries_sorted(const vector<pair<uint16_t, uint16_t>> &ans, const uint16_t q_id, const uint64_t T){
-    cout << q_id << " ";
-    //auto start = std::chrono::high_resolution_clock::now();
-    for (int a = static_cast<int>(ans.size()) - 1; a >= 0; a--)
+    void append(const uint64_t x)
     {
-        const auto &[idx, count] = ans[a];
-        if (count >= T)
+        char digits[24];
+        const auto end = std::to_chars(digits, digits + sizeof(digits), x).ptr;
+        buffer.append(digits, end - digits);
+    }
+
+public:
+    ResultWriter(std::ostream &out) : out(out) { buffer.reserve(1 << 21); }
+    ~ResultWriter()
+    {
+        try
         {
-            cout << idx << ":" << count << " ";
+            flush();
         }
-    } 
-    cout << "\n";
-    //auto end = std::chrono::high_resolution_clock::now();
-}
-
-void print_cout_queries_sorted(const vector<pair<uint16_t, uint16_t>> &ans, const uint16_t q_id){
-    cout << q_id << " ";
-    //auto start = std::chrono::high_resolution_clock::now();
-    for (int a = static_cast<int>(ans.size()) - 1; a >= 0; a--)
-    {
-        const auto &[idx, count] = ans[a];
-        if (count > 0)
+        catch (...)
         {
-            cout << idx << ":" << count << " ";
-        }
-    } 
-    cout << "\n";
-    //auto end = std::chrono::high_resolution_clock::now();
-}
-
-void print_cout_queries(const vector<int16_t> &results, const uint16_t q_id, const uint64_t T){
-    
-    cout << q_id << " ";
-
-    //auto start = std::chrono::high_resolution_clock::now();
-    for (auto idx = 0; idx < results.size(); idx++)
-    {
-        const auto &count = results[idx];
-        if (count >= T)
-        {   
-            cout << idx << ":" << count << " ";
         }
     }
-    cout << "\n";
 
-    //auto end = std::chrono::high_resolution_clock::now();
-
-}
-
-
-void print_cout_queries(const vector<int16_t> &results, const uint16_t q_id){
-    
-    cout << q_id << " ";
-
-    for (auto idx = 0; idx < results.size(); idx++)
+    void flush()
     {
-        const auto &count = results[idx];
-        if (count > 0)
-        {   
-            cout << idx << ":" << count << " ";
-        }
+        out.write(buffer.data(), buffer.size());
+        buffer.clear();
+        out.flush();
+        if (!out)
+            throw std::runtime_error("Could not write the output");
     }
-    cout << "\n";
 
-}
+    // Writes the line of one read. Colors with a score of at least min_score are reported;
+    // min_score must be at least 1, and max_score at least the largest score.
+    void write(const uint64_t read_number, const std::vector<int32_t> &scores, const int64_t min_score, const int64_t max_score)
+    {
+        append(read_number);
+        buffer.push_back(' ');
 
+        if (min_score <= max_score)
+        {
+            // Counting sort by decreasing score; colors stay in increasing order within a score
+            bucket_start.assign(max_score - min_score + 2, 0);
+            uint64_t n_reported = 0;
+            for (const int32_t score : scores)
+            {
+                if (score >= min_score)
+                {
+                    bucket_start[max_score - score + 1]++;
+                    n_reported++;
+                }
+            }
+            for (size_t i = 1; i < bucket_start.size(); i++)
+                bucket_start[i] += bucket_start[i - 1];
+            ordered.resize(n_reported);
+            for (uint32_t color = 0; color < scores.size(); color++)
+            {
+                const int32_t score = scores[color];
+                if (score >= min_score)
+                    ordered[bucket_start[max_score - score]++] = {color, static_cast<uint32_t>(score)};
+            }
+            for (const auto &[color, score] : ordered)
+            {
+                append(color);
+                buffer.push_back(':');
+                append(score);
+                buffer.push_back(' ');
+            }
+        }
+        buffer.push_back('\n');
+        if (buffer.size() >= (1 << 20))
+            flush();
+    }
+};
