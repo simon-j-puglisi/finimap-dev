@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Fluke8.hh"
+#include "kmer_filter.hh"
 #include "mapped_array.hh"
 #include "PrefTab.hh"
 
@@ -22,24 +23,12 @@
 // Lookup keys hold this many characters, two bits each, starting from the top of a 64-bit word.
 constexpr uint64_t FINIMIZER_KEY_CHARS = 31;
 
-// The 2-bit code of a nucleotide, or 4 for any other character.
-inline uint8_t nucleotide_code(const char c)
-{
-    switch (c)
-    {
-    case 'A': case 'a': return 0;
-    case 'C': case 'c': return 1;
-    case 'G': case 'g': return 2;
-    case 'T': case 't': return 3;
-    default: return 4;
-    }
-}
-
 // Time spent in the parts of a search, in nanoseconds.
 struct QueryTimes
 {
     uint64_t prepare = 0; // Building and grouping the lookup keys
     uint64_t lookup = 0;  // Finimizer lookups
+    uint64_t filter = 0;  // Testing k-mers for membership (found-in-index mode)
     uint64_t pick = 0;    // Picking the finimizer of each k-mer
     uint64_t count = 0;   // Counting colors
     uint64_t format = 0;  // Thresholding and formatting the result lines
@@ -49,6 +38,7 @@ struct QueryTimes
     {
         prepare += o.prepare;
         lookup += o.lookup;
+        filter += o.filter;
         pick += o.pick;
         count += o.count;
         format += o.format;
@@ -80,6 +70,12 @@ struct BatchWorkspace
     std::vector<uint64_t> finimizers_start;                // Where each read's ids start in `finimizers`, plus one end
     std::vector<PickCandidate> candidates;                 // Sliding window of candidates, for picking
     std::vector<uint64_t> bucket_start;                    // For grouping the keys
+    // Found-in-index mode only:
+    std::vector<uint64_t> kmers;                           // Canonical k-mers of the batch, read after read
+    std::vector<uint32_t> kmer_pos;                        // Position in the batch where each of them starts
+    std::vector<uint8_t> kmer_passed;                      // Whether each passed the filter
+    std::vector<uint8_t> pass;                             // Per position: 1 if the k-mer starting there passed
+    std::vector<uint64_t> n_passed;                        // Per read: number of k-mers that passed
     QueryTimes times;
 };
 
@@ -88,14 +84,18 @@ struct BatchWorkspace
 // (k-mers without a finimizer, or with a character that is not a nucleotide, are left out).
 // `off` is the offset of the read in the batch arrays, `len` its length.
 //
+// If `pass` is not null, a k-mer is also left out unless pass[position of its start] is set.
+//
 // This is the reference version: it scans the k positions of every k-mer.
 inline void pick_finimizers_scan(const BatchWorkspace &ws, const uint64_t off, const uint64_t len, const uint64_t k,
-                                 const Array<uint64_t> &color_set_ids, std::vector<int64_t> &out)
+                                 const Array<uint64_t> &color_set_ids, const uint8_t *pass, std::vector<int64_t> &out)
 {
     for (uint64_t start = 0; start + k <= len; start++)
     {
         if (ws.max_len[off + start] < k)
             continue; // The k-mer contains a character that is not a nucleotide
+        if (pass && !pass[off + start])
+            continue; // The k-mer is not in the index
         const uint64_t end = start + k - 1;
         // (length, rank) of the best finimizer so far
         std::pair<uint64_t, uint64_t> best = {k + 1, 0};
@@ -128,7 +128,7 @@ inline void pick_finimizers_scan(const BatchWorkspace &ws, const uint64_t off, c
 // k-mer moves right, and they leave it in the same order. If the ends are not in order (which
 // would mean a wrong lookup), the read is handled by the scanning version instead.
 inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64_t len, const uint64_t k,
-                            const Array<uint64_t> &color_set_ids, std::vector<int64_t> &out)
+                            const Array<uint64_t> &color_set_ids, const uint8_t *pass, std::vector<int64_t> &out)
 {
     if (len < k)
         return;
@@ -142,7 +142,7 @@ inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64
         if (end < last_end)
         {
             ws.times.scanned_reads++;
-            pick_finimizers_scan(ws, off, len, k, color_set_ids, out);
+            pick_finimizers_scan(ws, off, len, k, color_set_ids, pass, out);
             return;
         }
         last_end = end;
@@ -175,7 +175,8 @@ inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64
         }
         while (head < tail && candidates[head].pos < start)
             head++;
-        if (head < tail && ws.max_len[off + start] >= k)
+        // The window is kept up to date for every k-mer; only the vote is conditional
+        if (head < tail && ws.max_len[off + start] >= k && (!pass || pass[off + start]))
         {
             const uint64_t rank = candidates[head].rank;
             if (rank >= color_set_ids.size())
@@ -188,8 +189,11 @@ inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64
 // Looks up, for every position of every read, the finimizer that starts there, and then picks
 // the finimizer of every k-mer. Handles reads[0 .. n_reads). Afterwards the color set ids of
 // the finimizers of read i's k-mers are ws.finimizers[ws.finimizers_start[i] .. ws.finimizers_start[i+1]).
+//
+// With a filter (found-in-index mode), only the k-mers that pass it get a finimizer, and
+// ws.n_passed[i] is the number of read i's k-mers that passed.
 inline void find_finimizers(const std::vector<std::string> &reads, const uint64_t n_reads, const Fluke8 &f8, const PrefTab &ptab,
-                            const Array<uint64_t> &color_set_ids, const uint64_t k, BatchWorkspace &ws)
+                            const Array<uint64_t> &color_set_ids, const uint64_t k, const KmerFilter *filter, BatchWorkspace &ws)
 {
     uint64_t t0 = now_ns();
 
@@ -280,14 +284,50 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
     uint64_t t2 = now_ns();
     ws.times.lookup += t2 - t1;
 
+    // Found-in-index mode: test every k-mer of the batch for membership
+    const uint8_t *pass = nullptr;
+    if (filter)
+    {
+        ws.kmers.clear();
+        ws.kmer_pos.clear();
+        ws.n_passed.assign(n_reads, 0);
+        for (uint64_t ri = 0; ri < n_reads; ri++)
+        {
+            const uint64_t off = ws.read_start[ri];
+            for_each_canonical_kmer(reads[ri], k, [&](const uint64_t start, const uint64_t kmer) {
+                ws.kmers.push_back(kmer);
+                ws.kmer_pos.push_back(static_cast<uint32_t>(off + start));
+            });
+        }
+        ws.kmer_passed.resize(ws.kmers.size());
+        filter->test(ws.kmers.data(), ws.kmers.size(), ws.kmer_passed.data());
+
+        ws.pass.assign(total, 0);
+        uint64_t ri = 0;
+        for (uint64_t i = 0; i < ws.kmers.size(); i++)
+        {
+            if (!ws.kmer_passed[i])
+                continue;
+            const uint64_t pos = ws.kmer_pos[i];
+            ws.pass[pos] = 1;
+            while (pos >= ws.read_start[ri + 1])
+                ri++;
+            ws.n_passed[ri]++;
+        }
+        pass = ws.pass.data();
+    }
+
+    uint64_t t3 = now_ns();
+    ws.times.filter += t3 - t2;
+
     ws.finimizers.clear();
     ws.finimizers_start.clear();
     for (uint64_t ri = 0; ri < n_reads; ri++)
     {
         ws.finimizers_start.push_back(ws.finimizers.size());
-        pick_finimizers(ws, ws.read_start[ri], reads[ri].size(), k, color_set_ids, ws.finimizers);
+        pick_finimizers(ws, ws.read_start[ri], reads[ri].size(), k, color_set_ids, pass, ws.finimizers);
     }
     ws.finimizers_start.push_back(ws.finimizers.size());
 
-    ws.times.pick += now_ns() - t2;
+    ws.times.pick += now_ns() - t3;
 }

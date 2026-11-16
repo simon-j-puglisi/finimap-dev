@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,38 @@ using namespace std;
 // A batch is closed after this many characters even if it holds fewer reads than the batch size
 constexpr uint64_t MAX_BATCH_CHARS = 16000000;
 
+// How reads are scored and thresholded.
+struct QueryMode
+{
+    // Default mode: every k-mer with a finimizer in the index votes. A color is reported if
+    // its score is at least floor(found * threshold_float), and at least 1, where found is
+    // the number of k-mers that voted.
+    float threshold_float = 0;
+
+    // Found-in-index mode (filter is set): only k-mers that pass the filter vote. A color is
+    // reported if score / n_pos >= threshold, as real numbers, and its score is at least 1,
+    // where n_pos is the number of k-mers that passed the filter.
+    const KmerFilter *filter = nullptr;
+    double threshold = 0;
+
+    bool print_denominator = false; // Write found or n_pos after the read's number
+};
+
+// The smallest score s >= 1 with s / n_pos >= threshold as real numbers, for n_pos >= 1.
+// It is larger than n_pos if no score can pass.
+inline int64_t min_score_for_ratio(const double threshold, const uint64_t n_pos)
+{
+    const double n = static_cast<double>(n_pos);
+    int64_t s = static_cast<int64_t>(std::ceil(threshold * n));
+    s = std::max<int64_t>(s, 1);
+    // The product is rounded, so settle on the comparison that defines the rule
+    while (s > 1 && static_cast<double>(s - 1) / n >= threshold)
+        s--;
+    while (s <= static_cast<int64_t>(n_pos) && static_cast<double>(s) / n < threshold)
+        s++;
+    return s;
+}
+
 // Everything one thread needs to handle a batch of reads.
 struct QueryWorker
 {
@@ -34,14 +68,11 @@ struct QueryWorker
     string error;             // Set if handling the batch failed
 
     // Finds the finimizers of the batch's reads, counts colors and formats the result lines.
-    //
-    // A color is reported for a read if its score is at least floor(found * t), and at least
-    // 1, where found is the number of the read's k-mers that have a finimizer in the index.
-    void run(const CompressedColoredFinimizers &index, const float t)
+    void run(const CompressedColoredFinimizers &index, const QueryMode &mode)
     {
         try
         {
-            find_finimizers(reads, n_reads, index.f8, index.pt, index.loaded_color_set_ids, index.get_k(), ws);
+            find_finimizers(reads, n_reads, index.f8, index.pt, index.loaded_color_set_ids, index.get_k(), mode.filter, ws);
             for (uint64_t i = 0; i < n_reads; i++)
             {
                 const uint64_t t0 = now_ns();
@@ -49,8 +80,21 @@ struct QueryWorker
                 const uint64_t found = ws.finimizers_start[i + 1] - ws.finimizers_start[i];
                 const int32_t *scores = counter.count(ids, found, index.CCS, index.n_colors);
                 const uint64_t t1 = now_ns();
-                const int64_t threshold = static_cast<int64_t>(found * t);
-                formatter.write(first_read + i, scores, index.n_colors, max<int64_t>(threshold, 1), found);
+
+                // No score can exceed the number of k-mers that voted
+                uint64_t denominator;
+                int64_t min_score;
+                if (mode.filter)
+                {
+                    denominator = ws.n_passed[i];
+                    min_score = (denominator == 0) ? 1 : min_score_for_ratio(mode.threshold, denominator);
+                }
+                else
+                {
+                    denominator = found;
+                    min_score = max<int64_t>(static_cast<int64_t>(found * mode.threshold_float), 1);
+                }
+                formatter.write(first_read + i, scores, index.n_colors, min_score, found, mode.print_denominator ? static_cast<int64_t>(denominator) : -1);
                 ws.times.count += t1 - t0;
                 ws.times.format += now_ns() - t1;
             }
@@ -73,7 +117,7 @@ struct QuerySummary
 // Queries the reads of one file and writes one result line per read, in the order of the file.
 // The reads are taken in batches, and up to n_threads batches are handled at the same time.
 template <typename out_stream_t>
-QuerySummary run_fmin_queries_batch(const string &infile, out_stream_t &out, const CompressedColoredFinimizers &index, const float t, const uint64_t batch_size, const uint64_t n_threads)
+QuerySummary run_fmin_queries_batch(const string &infile, out_stream_t &out, const CompressedColoredFinimizers &index, const QueryMode &mode, const uint64_t batch_size, const uint64_t n_threads)
 {
     QueryReader reader(infile);
     vector<QueryWorker> workers(n_threads);
@@ -115,7 +159,7 @@ QuerySummary run_fmin_queries_batch(const string &infile, out_stream_t &out, con
 
         #pragma omp parallel for num_threads(n_threads) schedule(dynamic, 1) if (n_active > 1)
         for (uint64_t i = 0; i < n_active; i++)
-            workers[i].run(index, t);
+            workers[i].run(index, mode);
 
         t0 = now_ns();
         for (uint64_t i = 0; i < n_active; i++)
@@ -145,7 +189,7 @@ QuerySummary run_fmin_queries_batch(const string &infile, out_stream_t &out, con
 }
 
 // Runs the queries of every input file. Returns the totals.
-QuerySummary run_fmin_queries(const vector<string> &infiles, const optional<vector<string>> &outfiles, const CompressedColoredFinimizers &index, const float t, const uint64_t batch_size, const uint64_t n_threads)
+QuerySummary run_fmin_queries(const vector<string> &infiles, const optional<vector<string>> &outfiles, const CompressedColoredFinimizers &index, const QueryMode &mode, const uint64_t batch_size, const uint64_t n_threads)
 {
     if (outfiles.has_value() && infiles.size() != outfiles.value().size())
     {
@@ -162,14 +206,14 @@ QuerySummary run_fmin_queries(const vector<string> &infiles, const optional<vect
             ofstream out(outfile, ios::binary);
             if (!out)
                 throw runtime_error("Could not open " + outfile + " for writing");
-            one = run_fmin_queries_batch(infiles[i], out, index, t, batch_size, n_threads);
+            one = run_fmin_queries_batch(infiles[i], out, index, mode, batch_size, n_threads);
             out.close();
             if (!out)
                 throw runtime_error("Could not write " + outfile);
         }
         else
         { // To stdout
-            one = run_fmin_queries_batch(infiles[i], cout, index, t, batch_size, n_threads);
+            one = run_fmin_queries_batch(infiles[i], cout, index, mode, batch_size, n_threads);
         }
         total.n_reads += one.n_reads;
         total.times.add(one.times);
@@ -187,7 +231,10 @@ int search_fmin_batch(int argc, char **argv)
         ("o,out-file", "Output filename, or stdout if not given. One line per read: the read's number (from 0), then color:score pairs, highest score first.", cxxopts::value<string>())
         ("i,index-file", "Index filename prefix (the file is PREFIX.fmin).", cxxopts::value<string>())
         ("q,query-file", "The queries in FASTA or FASTQ format, possibly gzipped. Reads may have different lengths. Multi-line FASTQ is not supported. If the file extension is .txt, this is interpreted as a list of query files, one per line. In this case, --out-file is also interpreted as a list of output files in the same manner, one line for each input file.", cxxopts::value<string>())
-        ("t", "Threshold, a fraction from 0 to 1. A color is reported if its score is at least floor(t * found), and at least 1, where found is the number of the read's k-mers that have a finimizer in the index.", cxxopts::value<float>()->default_value("0"))
+        ("t", "Threshold, a fraction from 0 to 1. A color is reported if its score is at least floor(t * found), and at least 1, where found is the number of the read's k-mers that have a finimizer in the index.", cxxopts::value<string>()->default_value("0"))
+        ("found-in-index", "Found-in-index mode: only the read's k-mers that occur in the index vote, and a color is reported if score / n_pos >= t, where n_pos is the number of those k-mers. Needs a k-mer filter.")
+        ("exact-kmers", "For testing the found-in-index mode: use as the filter the exact set of k-mers of the reference files listed in this file (one path per line, as given to finimizer_matrix). Takes 8 bytes per distinct k-mer.", cxxopts::value<string>())
+        ("print-denominator", "Write, after each read's number, the number its scores are thresholded against: found, or n_pos in found-in-index mode.")
         ("b", "Batch size, in reads", cxxopts::value<uint64_t>()->default_value("1000"))
         ("threads", "Number of threads. The results do not depend on it.", cxxopts::value<uint64_t>()->default_value("1"))
         ("h,help", "Print usage");
@@ -205,9 +252,23 @@ int search_fmin_batch(int argc, char **argv)
     if (!opts.count("query-file"))
         throw runtime_error("No query file given (-q)");
 
-    const float t = opts["t"].as<float>();
-    if (!(t >= 0 && t <= 1))
-        throw runtime_error("The threshold (-t) must be between 0 and 1");
+    // The threshold is read both as a float, which the default mode has always used, and as a
+    // double, for the real-number comparison of the found-in-index mode
+    QueryMode mode;
+    {
+        const string text = opts["t"].as<string>();
+        char *end_f = nullptr, *end_d = nullptr;
+        mode.threshold_float = std::strtof(text.c_str(), &end_f);
+        mode.threshold = std::strtod(text.c_str(), &end_d);
+        if (text.empty() || *end_f != '\0' || *end_d != '\0' || !(mode.threshold >= 0 && mode.threshold <= 1))
+            throw runtime_error("The threshold (-t) must be a number between 0 and 1");
+    }
+    mode.print_denominator = opts.count("print-denominator") > 0;
+    const bool found_in_index = opts.count("found-in-index") > 0;
+    if (opts.count("exact-kmers") && !found_in_index)
+        throw runtime_error("--exact-kmers is only used with --found-in-index");
+    if (found_in_index && !opts.count("exact-kmers"))
+        throw runtime_error("--found-in-index needs a k-mer filter; for now the only one is --exact-kmers");
     const uint64_t batch_size = opts["b"].as<uint64_t>();
     if (batch_size == 0)
         throw runtime_error("The batch size (-b) must be at least 1");
@@ -260,18 +321,29 @@ int search_fmin_batch(int argc, char **argv)
     cerr << "Index loaded" << endl;
     const uint64_t loaded_ns = now_ns();
 
-    const QuerySummary summary = run_fmin_queries(query_files, output_files, index, t, batch_size, n_threads);
+    std::unique_ptr<KmerFilter> filter;
+    if (found_in_index)
+    {
+        cerr << "Building the exact k-mer set..." << endl;
+        filter = std::make_unique<ExactKmerSet>(opts["exact-kmers"].as<string>(), index.get_k());
+        mode.filter = filter.get();
+        cerr << "Found-in-index mode, filter: " << filter->description() << endl;
+    }
+    const uint64_t filter_ns = now_ns();
+
+    const QuerySummary summary = run_fmin_queries(query_files, output_files, index, mode, batch_size, n_threads);
     const uint64_t done_ns = now_ns();
 
     const auto seconds = [](const uint64_t ns) { return ns / 1e9; };
     cerr << "Total number of reads: " << summary.n_reads << endl;
     cerr << std::fixed << std::setprecision(2)
          << "Time (s): index load " << seconds(loaded_ns - start_ns)
-         << ", search " << seconds(done_ns - loaded_ns)
+         << ", search " << seconds(done_ns - filter_ns)
          << " (wall, " << n_threads << (n_threads == 1 ? " thread)" : " threads)") << endl
          << "Search time by part (s, summed over threads): reading queries " << seconds(summary.read_ns)
          << ", preparing keys " << seconds(summary.times.prepare)
          << ", finimizer lookups " << seconds(summary.times.lookup)
+         << ", k-mer filter " << seconds(summary.times.filter)
          << ", picking finimizers " << seconds(summary.times.pick)
          << ", counting colors " << seconds(summary.times.count)
          << ", formatting " << seconds(summary.times.format)

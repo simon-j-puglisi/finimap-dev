@@ -270,6 +270,27 @@ Output example:
 3 2:50 
 ```
 
+### Found-in-index mode (experimental)
+
+By default every k-mer of a read that contains an indexed finimizer votes, including k-mers
+that are not in the index themselves (a k-mer with a sequencing error usually still contains a
+finimizer). With `--found-in-index`, only the read's k-mers that occur in the index vote, and
+the threshold is taken against their number: a color is reported if `score / n_pos >= t`, as
+real numbers, and its score is at least 1, where `n_pos` is the number of the read's k-mers
+found in the index.
+
+The mode needs a membership test for k-mers. For now the only one is an exact set built at
+query time from the reference files, meant for testing on small collections:
+
+```bash
+./finimap search-fmin -i <INDEX_PREFIX> -q <QUERY_FILE> -o <OUTPUT_FILE> -t 0.8 \
+  --found-in-index --exact-kmers <FILE_LIST>
+```
+
+`--print-denominator` (in either mode) writes, after each read's number, the number its scores
+are thresholded against. The programs in `dev/checks/` compare the output of both modes with
+exact k-mer counts.
+
 ### Limits
 
 - k can be at most 31.
