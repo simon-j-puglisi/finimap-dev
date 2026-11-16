@@ -41,7 +41,7 @@ struct QueryWorker
     {
         try
         {
-            find_finimizers(reads, n_reads, index.f8, index.pt, index.color_set_ids, index.get_k(), ws);
+            find_finimizers(reads, n_reads, index.f8, index.pt, index.loaded_color_set_ids, index.get_k(), ws);
             for (uint64_t i = 0; i < n_reads; i++)
             {
                 const uint64_t t0 = now_ns();

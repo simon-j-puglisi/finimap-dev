@@ -2,6 +2,7 @@
 #define _PREF_TAB_H_
 
 #include <algorithm>
+#include "mapped_array.hh"
 #include <bit>
 #include <chrono>
 #include <cstdint>
@@ -272,23 +273,8 @@ class PrefTab {
        is.read((char *)&_nprefs, sizeof(uint64_t));
        is.read((char *)&_nfins, sizeof(uint64_t));
        cerr << "preflen nprefs nfins: "<<_preflen<<' '<<_nprefs<<' '<<_nfins<<'\n';
-       _X.resize(_nprefs+1);
-       is.read((char *)_X.data(), (_nprefs+1)*sizeof(uint32_t));
-       uint64_t nempties = 0;
-       for(int i=0;i<_nprefs;i++){
-          nempties += (_X[i] & 1);
-       }
-       cerr << "# empty buckets: "<<nempties<<'\n';
-       _F.resize(_nfins);
-       is.read((char *)_F.data(), _nfins*sizeof(uint64_t));
-       for(int i=0;i<10;i++){
-          cerr << _X[i] << ' ';
-       }
-       cerr << '\n';
-       for(int i=0;i<10;i++){
-          cerr << _F[i] << ' ';
-       }
-       cerr << '\n';
+       _X.load(is, _nprefs+1);
+       _F.load(is, _nfins);
     }
    
 
@@ -299,8 +285,8 @@ class PrefTab {
     uint64_t _preflen; //prefix length used for lookup table
     uint64_t _nprefs; //the number of prefixes == 1<<(_preflen<<1);
     uint64_t _nfins; //the number of finimizers == |_F|
-    std::vector<uint32_t> _X; //the lookup table _X[0.._nprefs-1]
-    std::vector<uint64_t> _F; //the finimizers, minus their prefixes, bit-packed and tagged with their lengths
+    Array<uint32_t> _X;
+    Array<uint64_t> _F;
 };
 
 #endif

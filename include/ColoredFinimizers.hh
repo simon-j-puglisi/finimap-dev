@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 #include <optional>
 #include <unordered_map>
@@ -11,6 +12,7 @@
 
 #include "Fluke8.hh"
 #include "PrefTab.hh"
+#include "mapped_array.hh"
 
 #include "batch_querying.hh"
 
@@ -188,7 +190,9 @@ public:
     Fluke8 f8;
     PrefTab pt;
 
-    vector<uint64_t> color_set_ids;
+    vector<uint64_t> color_set_ids;       // The color set of each finimizer, while the index is built
+    Array<uint64_t> loaded_color_set_ids; // The same, in a loaded index
+    std::shared_ptr<MappedFile> mapping;  // The index file, if it is loaded by mapping it
 
     int get_k() const { return k; }
 
@@ -508,14 +512,27 @@ public:
         out.close();
         cerr << "DONE" << endl;
     }
+    // Loads the index from PREFIX.fmin. The file is mapped into memory and its large arrays
+    // are used in place; if it cannot be mapped, it is read in the ordinary way.
     void load(const std::string &index_prefix)
     {
         string filename = index_prefix + ".fmin";
-        std::ifstream in(filename, std::ios::binary);
-        if (!in)
+        std::ifstream file(filename, std::ios::binary);
+        if (!file)
         {
             throw std::runtime_error("Could not open the index file " + filename);
         }
+        std::unique_ptr<MemoryStreamBuf> memory;
+        try
+        {
+            mapping = std::make_shared<MappedFile>(filename);
+            memory = std::make_unique<MemoryStreamBuf>(mapping->data(), mapping->size());
+        }
+        catch (const std::runtime_error &)
+        {
+            mapping.reset(); // Read from `file` instead
+        }
+        std::istream in(memory ? static_cast<std::streambuf *>(memory.get()) : file.rdbuf());
 
         // The file has no signature, so check what can be checked. A read past the end of
         // the file raises an exception at once, before a half-read structure can be used.
@@ -530,8 +547,7 @@ public:
             in.read(reinterpret_cast<char *>(&color_set_ids_size), sizeof(uint64_t));
             cerr << "color_set_ids_size: " << color_set_ids_size << endl; // Do we need this?
 
-            color_set_ids.resize(color_set_ids_size);
-            in.read(reinterpret_cast<char *>(color_set_ids.data()), color_set_ids_size * sizeof(uint64_t));
+            loaded_color_set_ids.load(in, color_set_ids_size);
 
             f8.load(in);
             pt.load(in);
@@ -567,7 +583,6 @@ public:
         if (k == 0 || k > MAX_K)
             throw std::runtime_error(filename + " is not a valid Finimap index (k = " + to_string(k) + ")");
 
-        in.close();
         cerr << "DONE" << endl;
     }
 };

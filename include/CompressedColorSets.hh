@@ -8,6 +8,7 @@
 #include <sdsl/enc_vector.hpp>
 
 #include "deltaset.hpp"
+#include "mapped_array.hh"
 
 using namespace std;
 
@@ -20,10 +21,23 @@ private:
     DeltaSet EF;
     sdsl::bit_vector BV;
 
+    // After load() the bitmaps and the lists are read from here, and BV and L stay empty
+    bool loaded = false;
+    Array<uint64_t> loaded_BV;
+    Array<uint16_t> loaded_L;
+
 public:
-    const std::vector<uint16_t> &getL() const { return L; }
     const DeltaSet &getEF() const { return EF; }
-    const sdsl::bit_vector &getBV() const { return BV; }
+    // The words of the concatenated bitmaps, and the concatenated lists of colors.
+    // The pointers may be unaligned: read through their element type.
+    const Array<uint64_t>::element *bitmap_words() const
+    {
+        return loaded ? loaded_BV.data() : reinterpret_cast<const Array<uint64_t>::element *>(BV.data());
+    }
+    const Array<uint16_t>::element *list_colors() const
+    {
+        return loaded ? loaded_L.data() : reinterpret_cast<const Array<uint16_t>::element *>(L.data());
+    }
     uint64_t sparse_count = 0;
     uint64_t dense_count = 0;
 
@@ -387,15 +401,19 @@ public:
         // counts
         in.read(reinterpret_cast<char *>(&sparse_count), sizeof(sparse_count));
         in.read(reinterpret_cast<char *>(&dense_count), sizeof(dense_count));
-        // BV
-        sdsl::load(BV, in);
+        // BV, as sdsl writes a bit vector: its length in bits, then its 64-bit words
+        uint64_t BV_bits = 0;
+        in.read(reinterpret_cast<char *>(&BV_bits), sizeof(BV_bits));
+        if (BV_bits > UINT64_MAX - 63)
+            throw std::length_error("bit vector length");
+        loaded_BV.load(in, (BV_bits + 63) / 64);
         // EF
         EF.load(in);
         // L
         size_t L_size = 0;
         in.read(reinterpret_cast<char *>(&L_size), sizeof(L_size));
-        L.resize(L_size);
-        in.read(reinterpret_cast<char *>(L.data()), L_size * sizeof(uint16_t));
+        loaded_L.load(in, L_size);
+        loaded = true;
     }
 
 };

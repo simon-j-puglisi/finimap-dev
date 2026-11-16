@@ -19,6 +19,8 @@
 
 #include <stdexcept>
 
+#include "mapped_array.hh"
+
 using namespace std;
 using namespace std::chrono;
 
@@ -113,6 +115,8 @@ class Pred8v2 {
        _last_bucket_outside = (_n > 0) && ((_u >> 8) >= _nblocks);
        if(!_last_bucket_outside) return;
        _last_bucket_start = 0;
+       const Array<uint32_t> &_X = this->_X; //read-only: the arrays may lie in a mapped file
+       const Array<uint8_t> &_Y = this->_Y;
        if(_nblocks > 0){
           uint32_t x = _X[_nblocks-1];
           uint64_t last_before; //index of the last element before the bucket
@@ -288,13 +292,11 @@ class Pred8v2 {
        is.read((char *)&_min, sizeof(uint64_t));
        is.read((char *)&_nblocks, sizeof(uint64_t));
        cerr << "_u _n _min _nblocks _nActiveBuckets: "<<_u<<' '<<_n<<' '<<_min<<' '<<_nblocks<<' '<<_nActiveBuckets<<'\n';
-       _X.resize(_nblocks+1);
-       is.read((char *)_X.data(), sizeof(uint32_t)*(_nblocks+1));
+       _X.load(is, _nblocks+1);
        //_C = new uint8_t[_nblocks];
        //is.read((char *)_C, sizeof(uint8_t)*_nblocks);
        is.read((char *)&_nActiveBuckets, sizeof(uint64_t));
-       _Y.resize(_n);
-       is.read((char *)_Y.data(), sizeof(uint8_t)*_n);
+       _Y.load(is, _n);
        //_X[_nblocks] = (((_X[_nblocks-1] >> 1) + _C[_nblocks-1])<<1);
        find_last_bucket();
     }
@@ -321,8 +323,8 @@ class Pred8v2 {
     uint64_t _nActiveBuckets = 0;
     bool _last_bucket_outside = false; // The bucket of _u has no entry in _X (not stored; see find_last_bucket)
     uint64_t _last_bucket_start = 0;   // Index in _Y of the first element of that bucket
-    std::vector<uint32_t> _X;
-    std::vector<uint8_t> _Y;
+    Array<uint32_t> _X;
+    Array<uint8_t> _Y;
 };
 
 #endif

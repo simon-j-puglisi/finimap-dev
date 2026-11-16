@@ -173,8 +173,7 @@ class Fluke8 {
        is.read((char *)&_lowerlen, sizeof(uint64_t));
        cerr << "_u _n _min _upperlen _lowerlen: "<<_u<<' '<<_n<<' '<<_min<<' '<<_upperlen<<' '<<_lowerlen<<'\n';
        _pred8.load(is);
-       _lengths.resize(_n);
-       is.read((char *)_lengths.data(), _n*sizeof(uint8_t));
+       _lengths.load(is, _n);
     }
     
 //    Fluke8(Fluke8 &other){
@@ -202,7 +201,7 @@ class Fluke8 {
     uint64_t _min = 0;  // value of the smallest element
     uint64_t _upperlen = 0;  // universe size
     uint64_t _lowerlen = 0;  // number of elements
-    std::vector<uint8_t> _lengths;
+    Array<uint8_t> _lengths;
 };
 
 #endif

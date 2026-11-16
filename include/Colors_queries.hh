@@ -59,10 +59,10 @@ class ColorCounter
     }
 
     // Adds `weight` (at most 255) to the lanes of the colors of one bitmap row.
-    void add_row_to_lanes(const uint64_t *data, const uint64_t row, const uint64_t n_colors, const uint64_t weight)
+    void add_row_to_lanes(const Array<uint64_t>::element *data, const uint64_t row, const uint64_t n_colors, const uint64_t weight)
     {
         const uint64_t pos = row * n_colors;
-        const uint64_t *ptr = data + pos / 64;
+        const Array<uint64_t>::element *ptr = data + pos / 64;
         const uint64_t offset = pos % 64;
         const uint64_t n_words = (n_colors + 63) / 64;
         for (uint64_t w = 0; w < n_words; w++)
@@ -81,7 +81,7 @@ class ColorCounter
         }
     }
 
-    void add_bitmap(const uint64_t *data, const uint64_t row, const uint64_t n_colors, const uint64_t freq)
+    void add_bitmap(const Array<uint64_t>::element *data, const uint64_t row, const uint64_t n_colors, const uint64_t freq)
     {
         if (freq > 255)
         {
@@ -122,8 +122,8 @@ public:
             i = j;
         }
 
-        const uint64_t *data = CCS.getBV().data();
-        const vector<uint16_t> &L = CCS.getL();
+        const Array<uint64_t>::element *data = CCS.bitmap_words();
+        const Array<uint16_t>::element *L = CCS.list_colors();
         const DeltaSet &EF = CCS.getEF();
 
         // ids below sparse_count are sparse sets, then very dense sets up to dense_count,

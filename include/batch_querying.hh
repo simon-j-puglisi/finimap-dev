@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Fluke8.hh"
+#include "mapped_array.hh"
 #include "PrefTab.hh"
 
 // Finding the finimizers of a batch of reads.
@@ -89,7 +90,7 @@ struct BatchWorkspace
 //
 // This is the reference version: it scans the k positions of every k-mer.
 inline void pick_finimizers_scan(const BatchWorkspace &ws, const uint64_t off, const uint64_t len, const uint64_t k,
-                                 const std::vector<uint64_t> &color_set_ids, std::vector<int64_t> &out)
+                                 const Array<uint64_t> &color_set_ids, std::vector<int64_t> &out)
 {
     for (uint64_t start = 0; start + k <= len; start++)
     {
@@ -127,7 +128,7 @@ inline void pick_finimizers_scan(const BatchWorkspace &ws, const uint64_t off, c
 // k-mer moves right, and they leave it in the same order. If the ends are not in order (which
 // would mean a wrong lookup), the read is handled by the scanning version instead.
 inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64_t len, const uint64_t k,
-                            const std::vector<uint64_t> &color_set_ids, std::vector<int64_t> &out)
+                            const Array<uint64_t> &color_set_ids, std::vector<int64_t> &out)
 {
     if (len < k)
         return;
@@ -188,7 +189,7 @@ inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64
 // the finimizer of every k-mer. Handles reads[0 .. n_reads). Afterwards the color set ids of
 // the finimizers of read i's k-mers are ws.finimizers[ws.finimizers_start[i] .. ws.finimizers_start[i+1]).
 inline void find_finimizers(const std::vector<std::string> &reads, const uint64_t n_reads, const Fluke8 &f8, const PrefTab &ptab,
-                            const std::vector<uint64_t> &color_set_ids, const uint64_t k, BatchWorkspace &ws)
+                            const Array<uint64_t> &color_set_ids, const uint64_t k, BatchWorkspace &ws)
 {
     uint64_t t0 = now_ns();
 
