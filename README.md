@@ -296,8 +296,8 @@ use the filter.
 | `-i, --input` | Required | The list of reference files given to `finimizer_matrix` |
 | `-o, --out-file` | Required | Index filename prefix; the filter is written to `PREFIX.fmin.filter` |
 | `-k` | 31 | K-mer length (must match the index) |
-| `--bits-per-kmer` | 10 | Size of the filter. 10 gives about 1% false positives, 12 about 0.5%, 16 about 0.2%, 24 about 0.07% |
-| `--hashes` | 6 | Bit positions set per k-mer. Use about 8 with 16 bits, 10 with 24 |
+| `--bits-per-kmer` | 16 | Size of the filter. 10 gives about 1% false positives, 12 about 0.5%, 16 about 0.2%, 24 about 0.07% |
+| `--hashes` | 8 | Bit positions set per k-mer. Use about 6 with 10 bits, 8 with 16, 10 with 24 |
 | `--distinct-kmers` | estimated | Number of distinct k-mers, if known; skips the pass that estimates it |
 | `--threads` | 1 | Number of threads |
 
