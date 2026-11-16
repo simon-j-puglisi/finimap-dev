@@ -279,17 +279,44 @@ the threshold is taken against their number: a color is reported if `score / n_p
 real numbers, and its score is at least 1, where `n_pos` is the number of the read's k-mers
 found in the index.
 
-The mode needs a membership test for k-mers. For now the only one is an exact set built at
-query time from the reference files, meant for testing on small collections:
+The mode needs a membership test for k-mers: a filter built from the reference files and kept
+in its own file beside the index. The index itself is unchanged, and the default mode does not
+use the filter.
 
 ```bash
-./finimap search-fmin -i <INDEX_PREFIX> -q <QUERY_FILE> -o <OUTPUT_FILE> -t 0.8 \
-  --found-in-index --exact-kmers <FILE_LIST>
+# Build the filter once: writes <INDEX_PREFIX>.fmin.filter
+./finimap build-filter -i <FILE_LIST> -o <INDEX_PREFIX> --threads 8
+
+# Query in found-in-index mode
+./finimap search-fmin -i <INDEX_PREFIX> -q <QUERY_FILE> -o <OUTPUT_FILE> -t 0.9 --found-in-index
 ```
 
-`--print-denominator` (in either mode) writes, after each read's number, the number its scores
-are thresholded against. The programs in `dev/checks/` compare the output of both modes with
-exact k-mer counts.
+| `build-filter` parameter | Default | Description |
+|---|---|---|
+| `-i, --input` | Required | The list of reference files given to `finimizer_matrix` |
+| `-o, --out-file` | Required | Index filename prefix; the filter is written to `PREFIX.fmin.filter` |
+| `-k` | 31 | K-mer length (must match the index) |
+| `--bits-per-kmer` | 10 | Size of the filter. 10 gives about 1% false positives, 12 about 0.5%, 16 about 0.2%, 24 about 0.07% |
+| `--hashes` | 6 | Bit positions set per k-mer. Use about 8 with 16 bits, 10 with 24 |
+| `--distinct-kmers` | estimated | Number of distinct k-mers, if known; skips the pass that estimates it |
+| `--threads` | 1 | Number of threads |
+
+The filter is a blocked Bloom filter: a k-mer of the index always passes, and a k-mer that is
+not in the index passes with the false-positive probability. Such a k-mer is counted in
+`n_pos` and votes for the colors of whatever finimizer it contains, which need not include the
+read's true genomes. With thresholds near 1 this matters: one such k-mer is enough to drop a
+genome at `-t 1`. Use a larger filter for high thresholds.
+
+Other options of `search-fmin` for this mode:
+
+- `--filter FILE` uses a filter file other than `PREFIX.fmin.filter`.
+- `--exact-kmers FILE_LIST` uses, instead of the filter file, the exact set of k-mers of the
+  reference files, built at query time. It is for testing on small collections.
+- `--print-denominator` (in either mode) writes, after each read's number, the number its
+  scores are thresholded against.
+
+The programs in `dev/checks/` compare the output of both modes with exact k-mer counts, and the
+filter with the exact set.
 
 ### Limits
 

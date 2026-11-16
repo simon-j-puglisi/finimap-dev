@@ -232,8 +232,9 @@ int search_fmin_batch(int argc, char **argv)
         ("i,index-file", "Index filename prefix (the file is PREFIX.fmin).", cxxopts::value<string>())
         ("q,query-file", "The queries in FASTA or FASTQ format, possibly gzipped. Reads may have different lengths. Multi-line FASTQ is not supported. If the file extension is .txt, this is interpreted as a list of query files, one per line. In this case, --out-file is also interpreted as a list of output files in the same manner, one line for each input file.", cxxopts::value<string>())
         ("t", "Threshold, a fraction from 0 to 1. A color is reported if its score is at least floor(t * found), and at least 1, where found is the number of the read's k-mers that have a finimizer in the index.", cxxopts::value<string>()->default_value("0"))
-        ("found-in-index", "Found-in-index mode: only the read's k-mers that occur in the index vote, and a color is reported if score / n_pos >= t, where n_pos is the number of those k-mers. Needs a k-mer filter.")
-        ("exact-kmers", "For testing the found-in-index mode: use as the filter the exact set of k-mers of the reference files listed in this file (one path per line, as given to finimizer_matrix). Takes 8 bytes per distinct k-mer.", cxxopts::value<string>())
+        ("found-in-index", "Found-in-index mode: only the read's k-mers that occur in the index vote, and a color is reported if score / n_pos >= t, where n_pos is the number of those k-mers. Needs the k-mer filter made by build-filter (PREFIX.fmin.filter).")
+        ("filter", "The k-mer filter file to use in found-in-index mode, if it is not PREFIX.fmin.filter.", cxxopts::value<string>())
+        ("exact-kmers", "For testing the found-in-index mode: instead of the filter file, use the exact set of k-mers of the reference files listed in this file (one path per line, as given to finimizer_matrix). Takes 8 bytes per distinct k-mer.", cxxopts::value<string>())
         ("print-denominator", "Write, after each read's number, the number its scores are thresholded against: found, or n_pos in found-in-index mode.")
         ("b", "Batch size, in reads", cxxopts::value<uint64_t>()->default_value("1000"))
         ("threads", "Number of threads. The results do not depend on it.", cxxopts::value<uint64_t>()->default_value("1"))
@@ -265,10 +266,10 @@ int search_fmin_batch(int argc, char **argv)
     }
     mode.print_denominator = opts.count("print-denominator") > 0;
     const bool found_in_index = opts.count("found-in-index") > 0;
-    if (opts.count("exact-kmers") && !found_in_index)
-        throw runtime_error("--exact-kmers is only used with --found-in-index");
-    if (found_in_index && !opts.count("exact-kmers"))
-        throw runtime_error("--found-in-index needs a k-mer filter; for now the only one is --exact-kmers");
+    if ((opts.count("exact-kmers") || opts.count("filter")) && !found_in_index)
+        throw runtime_error("--exact-kmers and --filter are only used with --found-in-index");
+    if (opts.count("exact-kmers") && opts.count("filter"))
+        throw runtime_error("Give either --filter or --exact-kmers, not both");
     const uint64_t batch_size = opts["b"].as<uint64_t>();
     if (batch_size == 0)
         throw runtime_error("The batch size (-b) must be at least 1");
@@ -324,8 +325,21 @@ int search_fmin_batch(int argc, char **argv)
     std::unique_ptr<KmerFilter> filter;
     if (found_in_index)
     {
-        cerr << "Building the exact k-mer set..." << endl;
-        filter = std::make_unique<ExactKmerSet>(opts["exact-kmers"].as<string>(), index.get_k());
+        if (opts.count("exact-kmers"))
+        {
+            cerr << "Building the exact k-mer set..." << endl;
+            filter = std::make_unique<ExactKmerSet>(opts["exact-kmers"].as<string>(), index.get_k());
+        }
+        else
+        {
+            const string path = opts.count("filter") ? opts["filter"].as<string>() : index_prefix + ".fmin.filter";
+            if (!std::ifstream(path))
+                throw runtime_error("--found-in-index needs the k-mer filter " + path + ", which does not exist. Make it with: finimap build-filter -i <reference list> -o " + index_prefix);
+            auto bloom = std::make_unique<BlockedBloomFilter>(path);
+            if (bloom->get_k() != static_cast<uint64_t>(index.get_k()))
+                throw runtime_error("The k-mer filter " + path + " was built for k = " + to_string(bloom->get_k()) + ", but the index has k = " + to_string(index.get_k()));
+            filter = std::move(bloom);
+        }
         mode.filter = filter.get();
         cerr << "Found-in-index mode, filter: " << filter->description() << endl;
     }

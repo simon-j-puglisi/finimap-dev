@@ -214,6 +214,60 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
     ws.found_len.assign(total, 0);
     ws.keys.clear();
 
+    // Number of valid characters starting at each position, capped at k
+    for (uint64_t ri = 0; ri < n_reads; ri++)
+    {
+        const std::string &r = reads[ri];
+        const uint64_t len = r.size();
+        if (len < k)
+            continue; // No k-mers
+        const uint64_t off = ws.read_start[ri];
+        uint64_t run = 0;
+        for (uint64_t p = len; p-- > 0;)
+        {
+            run = (nucleotide_code(r[p]) < 4) ? std::min(run + 1, k) : 0;
+            ws.max_len[off + p] = run;
+        }
+    }
+    uint64_t t_filter = now_ns();
+    ws.times.prepare += t_filter - t0;
+
+    // Found-in-index mode: test every k-mer of the batch for membership. Only the k-mers that
+    // pass vote, so finimizers are then looked up only at the positions inside such k-mers.
+    const uint8_t *pass = nullptr;
+    if (filter)
+    {
+        ws.kmers.clear();
+        ws.kmer_pos.clear();
+        ws.n_passed.assign(n_reads, 0);
+        for (uint64_t ri = 0; ri < n_reads; ri++)
+        {
+            const uint64_t off = ws.read_start[ri];
+            for_each_canonical_kmer(reads[ri], k, [&](const uint64_t start, const uint64_t kmer) {
+                ws.kmers.push_back(kmer);
+                ws.kmer_pos.push_back(static_cast<uint32_t>(off + start));
+            });
+        }
+        ws.kmer_passed.resize(ws.kmers.size());
+        filter->test(ws.kmers.data(), ws.kmers.size(), ws.kmer_passed.data());
+
+        ws.pass.assign(total, 0);
+        uint64_t ri = 0;
+        for (uint64_t i = 0; i < ws.kmers.size(); i++)
+        {
+            if (!ws.kmer_passed[i])
+                continue;
+            const uint64_t pos = ws.kmer_pos[i];
+            ws.pass[pos] = 1;
+            while (pos >= ws.read_start[ri + 1])
+                ri++;
+            ws.n_passed[ri]++;
+        }
+        pass = ws.pass.data();
+    }
+    t0 = now_ns();
+    ws.times.filter += t0 - t_filter;
+
     for (uint64_t ri = 0; ri < n_reads; ri++)
     {
         const std::string &r = reads[ri];
@@ -222,16 +276,11 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
             continue; // No k-mers
         const uint64_t off = ws.read_start[ri];
 
-        // Number of valid characters starting at each position, capped at k
-        uint64_t run = 0;
-        for (uint64_t p = len; p-- > 0;)
-        {
-            run = (nucleotide_code(r[p]) < 4) ? std::min(run + 1, k) : 0;
-            ws.max_len[off + p] = run;
-        }
-
-        // The key of position p holds r[p .. p+30], padded with zeros past the end of the read
+        // The key of position p holds r[p .. p+30], padded with zeros past the end of the read.
+        // With a filter, a position is skipped unless one of the k-mers that contain it passed:
+        // `covered` counts the positions left that the last passing k-mer covers.
         uint64_t key = 0;
+        uint64_t covered = 0;
         for (uint64_t q = 0; q < len + FINIMIZER_KEY_CHARS - 1; q++)
         {
             const uint64_t code = (q < len) ? (nucleotide_code(r[q]) & 3) : 0;
@@ -239,6 +288,14 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
             if (q + 1 >= FINIMIZER_KEY_CHARS)
             {
                 const uint64_t p = q + 1 - FINIMIZER_KEY_CHARS;
+                if (pass)
+                {
+                    if (pass[off + p])
+                        covered = k;
+                    if (covered == 0)
+                        continue;
+                    covered--;
+                }
                 if (ws.max_len[off + p] > 0)
                     ws.keys.push_back({key, static_cast<uint32_t>(off + p)});
             }
@@ -284,42 +341,6 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
     uint64_t t2 = now_ns();
     ws.times.lookup += t2 - t1;
 
-    // Found-in-index mode: test every k-mer of the batch for membership
-    const uint8_t *pass = nullptr;
-    if (filter)
-    {
-        ws.kmers.clear();
-        ws.kmer_pos.clear();
-        ws.n_passed.assign(n_reads, 0);
-        for (uint64_t ri = 0; ri < n_reads; ri++)
-        {
-            const uint64_t off = ws.read_start[ri];
-            for_each_canonical_kmer(reads[ri], k, [&](const uint64_t start, const uint64_t kmer) {
-                ws.kmers.push_back(kmer);
-                ws.kmer_pos.push_back(static_cast<uint32_t>(off + start));
-            });
-        }
-        ws.kmer_passed.resize(ws.kmers.size());
-        filter->test(ws.kmers.data(), ws.kmers.size(), ws.kmer_passed.data());
-
-        ws.pass.assign(total, 0);
-        uint64_t ri = 0;
-        for (uint64_t i = 0; i < ws.kmers.size(); i++)
-        {
-            if (!ws.kmer_passed[i])
-                continue;
-            const uint64_t pos = ws.kmer_pos[i];
-            ws.pass[pos] = 1;
-            while (pos >= ws.read_start[ri + 1])
-                ri++;
-            ws.n_passed[ri]++;
-        }
-        pass = ws.pass.data();
-    }
-
-    uint64_t t3 = now_ns();
-    ws.times.filter += t3 - t2;
-
     ws.finimizers.clear();
     ws.finimizers_start.clear();
     for (uint64_t ri = 0; ri < n_reads; ri++)
@@ -329,5 +350,5 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
     }
     ws.finimizers_start.push_back(ws.finimizers.size());
 
-    ws.times.pick += now_ns() - t3;
+    ws.times.pick += now_ns() - t2;
 }
