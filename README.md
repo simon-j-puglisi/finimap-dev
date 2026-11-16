@@ -184,7 +184,9 @@ This produces an index `example_data/coli_index.fmin`.
 
 ## Querying
 
-The `search-fmin` command finds finimizer matches in your query sequences against the built index.
+The `search-fmin` command pseudoaligns your query sequences against the built index: for each
+read it reports the reference genomes (colors) that share enough of the read's k-mers, judged
+through the k-mers' finimizers.
 
 ### Command
 
@@ -198,39 +200,46 @@ The `search-fmin` command finds finimizer matches in your query sequences agains
 |-----------|------|---------|-------------|
 | `-i, --index-file` | FILE | Required | Index filename prefix (from `build-fmin`) |
 | `-q, --query-file` | FILE | Required | Query sequences in FASTA/FASTQ format (may be gzipped). Or `.txt` file with list of query files (one per line) |
-| `-o, --out-file` | FILE | Required | Output filename (or stdout if omitted). Or `.txt` file with output file list (one per line, paired with query list) |
-| `-t` | INT | 0 | Threshold for reporting matches in threshold union queries. If 0: absolute counts; if > 0: percentage of matching k-mers; if 1 intersection union |
-| `-b` | INT | 1000 | Number of batched queries. |
+| `-o, --out-file` | FILE | stdout | Output filename. Or `.txt` file with output file list (one per line, paired with query list) |
+| `-t` | FLOAT | 0 | Threshold, a fraction from 0 to 1. A color is reported for a read if its score is at least `floor(t * found)`, and at least 1, where `found` is the number of the read's k-mers that have a finimizer in the index. With 0, every color with a score of at least 1 is reported |
+| `-b` | INT | 1000 | Number of reads handled together in a batch. It affects speed and memory, not the results |
 | `-h, --help` | - | - | Display help message |
+
+### Query files
+
+- The format (FASTA or FASTQ) is recognised from the content, and gzipped files are read directly.
+- Reads may have different lengths. A read shorter than k has no k-mers and is reported with no colors.
+- Upper and lower case are both accepted. A k-mer that contains any character other than A, C, G or T is skipped.
+- FASTA sequences may span several lines. FASTQ records must be four lines each.
 
 ### Output Format
 
-The output contains one line per query sequence:
+The output contains one line per query sequence, in the order of the query file:
 ```
-QUERY_ID color_1:count_1 color_2:count_2 color_3:count_3 ...
+QUERY_ID color_1:score_1 color_2:score_2 color_3:score_3 ...
 ```
 
 Where:
-- **QUERY_ID**: Sequence identifier from the query file (int)
+- **QUERY_ID**: Number of the read in the query file, starting from 0
 - **color_N**: Index of a reference genome in the index
-- **count_N**: Number of matching finimizers (absolute or percentage depending on `-t` threshold)
+- **score_N**: Number of the read's k-mers whose finimizer occurs in that genome. It is never below the number of the read's k-mers that occur in the genome
 
 Colors are assigned in the order references were listed in the original input file.
 
-```color:count``` pairs are sorted in decreasing order. 
-
-
+```color:score``` pairs are sorted by decreasing score, and by increasing color within a score.
+A read with no reported color gives a line with only its number. Progress messages go to
+standard error, so the output holds result lines only.
 
 ### Examples
 
-**Threshold union queries (no minimium match requirement):**
+**All colors that share at least one finimizer (no minimum match requirement):**
 ```bash
 ./finimap search-fmin \
   -i example_data/coli_index \
   -q example_data/queries.fna \
   -b 4 \
   -o results.txt \
-  -t 1
+  -t 0
 ```
 
 Output example:
@@ -241,7 +250,7 @@ Output example:
 3 2:50 0:21 1:21
 ```
 
-**Threshold union queries (80% match required):**
+**Threshold queries (80% match required):**
 ```bash
 ./finimap search-fmin \
   -i example_data/coli_index \
@@ -250,6 +259,19 @@ Output example:
   -o results.txt \
   -t 0.8
 ```
+
+Output example:
+```
+0 0:50 2:50 
+1 2:50 0:44 1:44 
+2 
+3 2:50 
+```
+
+### Limits
+
+- k can be at most 31.
+- An index can hold at most 65,535 colors.
 
 
 ## Additional Information
