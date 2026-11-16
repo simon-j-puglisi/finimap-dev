@@ -117,7 +117,7 @@ class Fluke8 {
        //cerr << "cle: " << cle << '\n';
        pair<uint64_t, uint64_t> p = _pred8.getPredPrefix(cle);
        //cerr << p.first << ' ' << p.second << '\n';
-       if(p.second){
+       if(p.second && p.first < _n){
           uint64_t lcp = p.second;
           lcp -= (((uint64_t)64)-(_upperlen<<1));
           lcp = lcp >> ((uint64_t)1); //lcp is now in symbols

@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <stdexcept>
+
 using namespace std;
 using namespace std::chrono;
 
@@ -33,7 +35,7 @@ class Pred8v2 {
 
        _X.resize(_nblocks+1); //+1 for a useful dummy at the end
        for(uint64_t i=0;i<_nblocks;i++) _X[i] = 0;
-       std::vector<uint8_t> _C(_nblocks, 0);
+       std::vector<uint8_t> _C(_nblocks+1, 0); //+1: the bucket of _u can be number _nblocks (see find_last_bucket)
 
        //NB: TODO currently assumes the 0th bucket is non-empty
 
@@ -100,6 +102,33 @@ class Pred8v2 {
        }
        _X[_nblocks] = (((_X[_nblocks-1] >> 2) + _C[_nblocks-1])<<2);
        cerr << "_X[_nblocks]: " << _X[_nblocks] << '\n';
+       find_last_bucket();
+    }
+
+    // When _u % 256 is 0 or 1, _nblocks is one less than the number of buckets, so the bucket
+    // of the largest elements (number _nblocks) has no entry in _X: its slot holds the dummy.
+    // Its elements are still the last ones of _Y. Here we find where they start, so that
+    // getPredPrefix can search that bucket. The stored index is left as it is.
+    void find_last_bucket(){
+       _last_bucket_outside = (_n > 0) && ((_u >> 8) >= _nblocks);
+       if(!_last_bucket_outside) return;
+       _last_bucket_start = 0;
+       if(_nblocks > 0){
+          uint32_t x = _X[_nblocks-1];
+          uint64_t last_before; //index of the last element before the bucket
+          if((x & 1) == 0 && (x & 2)){
+             //bucket _nblocks-1 is empty and stores the number of the last non-empty bucket;
+             //the empty bucket right after that one points to its last element
+             last_before = _X[(x >> 2) + 1] >> 2;
+          }else{
+             //the dummy points to the last element of bucket _nblocks-1 or of the one before
+             last_before = _X[_nblocks] >> 2;
+          }
+          _last_bucket_start = last_before + 1;
+       }
+       if(_last_bucket_start >= _n || _Y[_n-1] != (_u & 255)){
+          throw std::runtime_error("The index is inconsistent (last bucket of the predecessor structure)");
+       }
     }
 
     //  FIXME: as of 3 March 2026 this needs to be updated to not use _min, etc.
@@ -152,6 +181,23 @@ class Pred8v2 {
            //TODO: double check the lcp is being computed correctly in this case
            uint64_t lux = countl_zero(~((_u) ^ (~key))); 
            return {_n-1,lux};
+        }
+        if(_last_bucket_outside && (uint64_t)(key>>8) >= _nblocks){
+           //the bucket of the largest elements: see find_last_bucket
+           uint64_t k = key & 255;
+           for(uint64_t j=_last_bucket_start; j < _n; j++){
+              if(_Y[j] >= k){
+                 if(j > _last_bucket_start || _Y[j] == k){
+                    uint64_t idx = j-(1-(_Y[j] == k));
+                    uint64_t pred = _Y[idx];
+                    uint64_t lcp = countl_zero(~((pred) ^ (~k))); //lcp in bits, 64-bit oriented
+                    return {idx,lcp};
+                 }
+                 //the key is smaller than everything in its bucket, so no element is a prefix of it
+                 return {-1, 0};
+              }
+           }
+           return {-1, 0}; //not reached: key <= _u, and _u is the last element of this bucket
         }
         //cerr << "key: " << key << '\n';
         uint32_t x = _X[key>>8];
@@ -253,6 +299,7 @@ class Pred8v2 {
        _Y.resize(_n);
        is.read((char *)_Y.data(), sizeof(uint8_t)*_n);
        //_X[_nblocks] = (((_X[_nblocks-1] >> 1) + _C[_nblocks-1])<<1);
+       find_last_bucket();
     }
     
    //  Pred8v2(Pred8v2 &other){
@@ -278,6 +325,8 @@ class Pred8v2 {
     uint64_t _min = 0;  // value of the smallest element
     uint64_t _nblocks = 0;
     uint64_t _nActiveBuckets = 0;
+    bool _last_bucket_outside = false; // The bucket of _u has no entry in _X (not stored; see find_last_bucket)
+    uint64_t _last_bucket_start = 0;   // Index in _Y of the first element of that bucket
     std::vector<uint32_t> _X;
     std::vector<uint8_t> _Y;
 };
