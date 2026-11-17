@@ -14,6 +14,7 @@
 #   FM_FILTERS   filters to build, as "bits:hashes" pairs (default "10:6 16:8 24:10")
 #   FM_TAUS      thresholds for the found-in-index mode (default "0.8 0.9 0.96 1")
 #   FM_TAU       threshold for the default mode (default 0.8)
+#   FM_K         k of the index (default 31); the filters are built with the same k
 #   FM_CMAKE_MODULE, FM_GCC_MODULE   as in stage2.sh
 set -euo pipefail
 export LC_ALL=C
@@ -27,11 +28,12 @@ OUT=$(readlink -f "${FM_OUT:-$PWD}")
 FILTERS=${FM_FILTERS:-10:6 16:8 24:10}
 TAUS=${FM_TAUS:-0.8 0.9 0.96 1}
 TAU=${FM_TAU:-0.8}
+K=${FM_K:-31}
 JOBS=${SLURM_CPUS_PER_TASK:-4}
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
 
 echo "FM_FOUND_CHECK start host=$(hostname) date=$(date '+%F %T')"
-echo "repo=$REPO commit=$COMMIT index=$INDEX refs=$REFS ($(wc -l < "$REFS") files) queries=$QUERIES out=$OUT filters='$FILTERS' taus='$TAUS' threads=$JOBS"
+echo "repo=$REPO commit=$COMMIT index=$INDEX refs=$REFS ($(wc -l < "$REFS") files) queries=$QUERIES out=$OUT k=$K filters='$FILTERS' taus='$TAUS' threads=$JOBS"
 [ -e "$REPO/dev/timeit.py" ] || { echo "FM_ERROR repo not found at $REPO"; exit 1; }
 [ -s "$INDEX.fmin" ] || { echo "FM_ERROR index not found: $INDEX.fmin"; exit 1; }
 mkdir -p "$OUT/default" "$OUT/found"
@@ -56,7 +58,7 @@ for f in $FILTERS; do
     else
         # The first build estimates the number of distinct k-mers; the others reuse it
         extra=""; [ -z "$distinct" ] || extra="--distinct-kmers $distinct"
-        python3 "$REPO/dev/timeit.py" "$P.time.part" "$BIN" build-filter -i "$REFS" -o "$P" -k 31 \
+        python3 "$REPO/dev/timeit.py" "$P.time.part" "$BIN" build-filter -i "$REFS" -o "$P" -k "$K" \
             --bits-per-kmer "$bits" --hashes "$hashes" --threads "$JOBS" $extra 2> "$P.log" \
             || { echo "FM_ERROR build-filter failed:"; tail -n 5 "$P.log"; exit 1; }
         mv "$P.time.part" "$P.time.txt"
