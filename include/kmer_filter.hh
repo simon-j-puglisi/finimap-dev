@@ -326,3 +326,160 @@ public:
         return static_cast<uint64_t>(e + 0.5);
     }
 };
+
+// The exact set of the k-mers of a collection, as an open-addressing hash table of canonical
+// k-mers, for checking the found-in-index mode on collections too large for ExactKmerSet.
+// It takes 16 to 32 bytes per distinct k-mer (8 bytes per slot, at most half the slots used).
+//
+// File layout (PREFIX.fmin.filter, or any name): a 64-byte header of eight 64-bit integers
+//   magic, k, number of slots (a power of 2), number of k-mers, and four zeros
+// followed by the slots, 8 bytes each; an empty slot holds EMPTY.
+class ExactKmerTable : public KmerFilter
+{
+public:
+    static constexpr uint64_t MAGIC = 0x3154584B4D4946ULL | (0x45ULL << 56); // "FIMKXT1E" as bytes
+    static constexpr uint64_t HEADER_WORDS = 8;
+    static constexpr uint64_t EMPTY = ~0ULL; // Not a canonical k-mer for k <= 31
+
+private:
+    uint64_t k = 0;
+    uint64_t n_slots = 0;
+    uint64_t n_keys = 0;
+    std::vector<uint64_t> owned;
+    std::shared_ptr<MappedFile> mapping;
+    const uint64_t *slots = nullptr;
+
+    uint64_t home(const uint64_t kmer) const { return mix64(kmer ^ 0x5851F42D4C957F2DULL) & (n_slots - 1); }
+
+public:
+    // An empty table for about n_kmers distinct k-mers.
+    ExactKmerTable(const uint64_t k, const uint64_t n_kmers) : k(k)
+    {
+        if (k < 1 || k > 31)
+            throw std::runtime_error("The exact k-mer table needs k between 1 and 31");
+        n_slots = 1024;
+        while (n_slots < 2 * n_kmers + n_kmers / 8)
+            n_slots *= 2;
+        owned.assign(n_slots, EMPTY);
+        slots = owned.data();
+    }
+
+    // Loads PATH by mapping it. Throws std::runtime_error if it is not such a table.
+    ExactKmerTable(const std::string &path)
+    {
+        mapping = std::make_shared<MappedFile>(path);
+        if (mapping->size() < HEADER_WORDS * 8)
+            throw std::runtime_error(path + " is not a Finimap k-mer table (too short)");
+        uint64_t header[HEADER_WORDS];
+        std::memcpy(header, mapping->data(), sizeof(header));
+        if (header[0] != MAGIC)
+            throw std::runtime_error(path + " is not a Finimap k-mer table");
+        k = header[1];
+        n_slots = header[2];
+        n_keys = header[3];
+        if (n_slots == 0 || (n_slots & (n_slots - 1)) != 0 || mapping->size() != HEADER_WORDS * 8 + n_slots * 8)
+            throw std::runtime_error(path + " is not a complete Finimap k-mer table");
+        slots = reinterpret_cast<const uint64_t *>(mapping->data() + HEADER_WORDS * 8);
+    }
+
+    // True if `path` starts with this table's magic number.
+    static bool is_table_file(const std::string &path)
+    {
+        std::ifstream in(path, std::ios::binary);
+        uint64_t magic = 0;
+        in.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+        return in && magic == MAGIC;
+    }
+
+    uint64_t get_k() const { return k; }
+    uint64_t size() const { return n_keys; }
+    uint64_t size_in_bytes() const { return HEADER_WORDS * 8 + n_slots * 8; }
+
+    // Inserts a canonical k-mer. Safe to call from several threads at once.
+    // Throws std::runtime_error if the table is too full.
+    void insert(const uint64_t kmer)
+    {
+        uint64_t *table = owned.data();
+        uint64_t i = home(kmer);
+        for (uint64_t probes = 0; probes < n_slots; probes++)
+        {
+            uint64_t current = __atomic_load_n(&table[i], __ATOMIC_RELAXED);
+            if (current == kmer)
+                return;
+            if (current == EMPTY)
+            {
+                uint64_t expected = EMPTY;
+                if (__atomic_compare_exchange_n(&table[i], &expected, kmer, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                {
+                    __atomic_fetch_add(&n_keys, 1, __ATOMIC_RELAXED);
+                    if (n_keys > n_slots - n_slots / 8)
+                        throw std::runtime_error("The exact k-mer table is full: the number of distinct k-mers was underestimated");
+                    return;
+                }
+                if (expected == kmer)
+                    return;
+            }
+            i = (i + 1) & (n_slots - 1);
+        }
+        throw std::runtime_error("The exact k-mer table is full");
+    }
+
+    bool contains(const uint64_t kmer) const
+    {
+        uint64_t i = home(kmer);
+        while (true)
+        {
+            const uint64_t current = slots[i];
+            if (current == kmer)
+                return true;
+            if (current == EMPTY)
+                return false;
+            i = (i + 1) & (n_slots - 1);
+        }
+    }
+
+    void test(const uint64_t *kmers, const uint64_t n, uint8_t *pass) const override
+    {
+        constexpr uint64_t AHEAD = 16;
+        for (uint64_t i = 0; i < n; i++)
+        {
+            if (i + AHEAD < n)
+                __builtin_prefetch(slots + home(kmers[i + AHEAD]));
+            pass[i] = contains(kmers[i]);
+        }
+    }
+
+    std::string description() const override
+    {
+        char text[160];
+        snprintf(text, sizeof(text), "exact k-mer table, %.1f MB, %llu k-mers", size_in_bytes() / 1e6, static_cast<unsigned long long>(n_keys));
+        return text;
+    }
+
+    void save(const std::string &path) const
+    {
+        std::ofstream out(path, std::ios::binary);
+        if (!out)
+            throw std::runtime_error("Could not open " + path + " for writing");
+        const uint64_t header[HEADER_WORDS] = {MAGIC, k, n_slots, n_keys, 0, 0, 0, 0};
+        out.write(reinterpret_cast<const char *>(header), sizeof(header));
+        out.write(reinterpret_cast<const char *>(slots), n_slots * 8);
+        out.close();
+        if (!out)
+            throw std::runtime_error("Could not write " + path);
+    }
+};
+
+// Loads a filter file of either kind: a blocked Bloom filter or an exact k-mer table.
+inline std::unique_ptr<KmerFilter> load_kmer_filter(const std::string &path, uint64_t &k)
+{
+    if (ExactKmerTable::is_table_file(path))
+    {
+        auto table = std::make_unique<ExactKmerTable>(path);
+        k = table->get_k();
+        return table;
+    }
+    auto bloom = std::make_unique<BlockedBloomFilter>(path);
+    k = bloom->get_k();
+    return bloom;
+}

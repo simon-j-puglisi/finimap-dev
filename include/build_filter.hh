@@ -58,6 +58,8 @@ int build_filter(int argc, char **argv)
         ("k", "k-mer length (must match the index).", cxxopts::value<uint64_t>()->default_value("31"))
         ("bits-per-kmer", "Size of the filter, in bits per distinct k-mer. 10 gives about 1% false positives, 16 about 0.2%, 24 about 0.07%.", cxxopts::value<double>()->default_value("16"))
         ("hashes", "Bit positions set per k-mer. About 6 suits 10 bits per k-mer, 8 suits 16, and 10 suits 24.", cxxopts::value<uint64_t>()->default_value("8"))
+        ("exact", "Build an exact k-mer table instead of a Bloom filter: no false positives, 16 to 32 bytes per k-mer. For checking the found-in-index mode.")
+        ("filter-file", "Write to this file instead of PREFIX.fmin.filter.", cxxopts::value<string>())
         ("distinct-kmers", "Number of distinct canonical k-mers, if known. Skips the pass that estimates it.", cxxopts::value<uint64_t>())
         ("threads", "Number of threads.", cxxopts::value<uint64_t>()->default_value("1"))
         ("h,help", "Print usage");
@@ -79,7 +81,7 @@ int build_filter(int argc, char **argv)
     const uint64_t n_threads = opts["threads"].as<uint64_t>();
     if (n_threads == 0 || n_threads > 1024)
         throw runtime_error("The number of threads (--threads) must be between 1 and 1024");
-    const string out_path = opts["out-file"].as<string>() + ".fmin.filter";
+    const string out_path = opts.count("filter-file") ? opts["filter-file"].as<string>() : opts["out-file"].as<string>() + ".fmin.filter";
 
     vector<string> paths;
     for (const string &line : readlines(opts["input"].as<string>()))
@@ -106,6 +108,21 @@ int build_filter(int argc, char **argv)
     }
     cerr << "Distinct canonical k-mers: about " << n_distinct << endl;
     const uint64_t t1 = now_ns();
+
+    if (opts.count("exact"))
+    {
+        // Room for the estimate's error: the table refuses to fill beyond 7/8
+        ExactKmerTable table(k, n_distinct + n_distinct / 20);
+        cerr << "Inserting the k-mers into an exact table of " << table.size_in_bytes() << " bytes" << endl;
+        for_each_reference_kmer(paths, k, n_threads, [&](uint64_t, const uint64_t kmer) { table.insert(kmer); });
+        const uint64_t t2 = now_ns();
+        table.save(out_path);
+        cerr << std::fixed << std::setprecision(1)
+             << "Distinct canonical k-mers, exactly: " << table.size() << endl
+             << "Time (s): counting " << (t1 - t0) / 1e9 << ", inserting " << (t2 - t1) / 1e9 << ", writing " << (now_ns() - t2) / 1e9 << endl
+             << "Wrote " << out_path << " (" << table.size_in_bytes() << " bytes)" << endl;
+        return 0;
+    }
 
     BlockedBloomFilter filter(k, n_distinct, opts["bits-per-kmer"].as<double>(), opts["hashes"].as<uint64_t>());
     cerr << "Inserting the k-mers into a " << filter.description() << endl;
