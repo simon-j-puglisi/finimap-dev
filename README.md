@@ -142,7 +142,7 @@ cd ..
 | `-i, --index-file` | FILE | Required | Colored finimizer matrix (CFM) file from Stage 1 |
 | `-o, --out-file` | FILE | Required | Output index filename prefix (without extension) |
 | `-p, --p_len` | INT | 10 | Finimizer prefix length (bits used for bucketing). Higher values → more buckets → faster but larger index |
-| `-x, --x_len` | INT | 18 | Short/long finimizer threshold (bits). Finimizers shorter than this use one representation, longer use another |
+| `-x` | INT | 16 | Short/long finimizer threshold, in characters. Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
 | `-m, --meta` | BOOL | false | Set to `true` for metagenomic indexes (multiple reference genomes) |
 | `-h, --help` | - | - | Display help message |
@@ -153,9 +153,12 @@ cd ..
   - Smaller values: smaller index, slower queries
   - Larger values: faster queries, larger index size
   
-- **`-x` (short/long threshold)**: Affects short/long finimizer representation
-  - Typical values: 10-20
-  - Adjust based on your finimizer distribution
+- **`-x` (short/long threshold)**: Affects short/long finimizer representation, never the results
+  - The table for short finimizers takes 4^x / 64 bytes whatever the collection: 67 MB at 16,
+    1.07 GB at 18. Long finimizers take 8 bytes each instead of 2.
+  - On 3,498 *E. coli* genomes, `-x 16` gave a 1.94 GB index against 2.94 GB at `-x 18`, with
+    identical results and about the same query time; `-x 14` was slightly larger and slower than
+    `-x 16`. The paper used `-x 18`.
 
 #### Examples
 
@@ -166,7 +169,7 @@ cd ..
   -o example_data/coli_index \
   -k 31 \
   -p 10 \
-  -x 18
+  -x 16
 ```
 
 This produces an index `example_data/coli_index.fmin`.

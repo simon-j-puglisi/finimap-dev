@@ -11,7 +11,7 @@ int build_fmin(int argc, char **argv)
         ("i,index-file", "ColoredFinimizers file.", cxxopts::value<string>())
         ("o,out-file", "Output index filename prefix.", cxxopts::value<string>()) // as input
         ("p,p_len", "Finimizers prefix length.", cxxopts::value<int64_t>()->default_value(std::to_string(10)))
-        ("x", "Short-Long finimizers threshold",  cxxopts::value<int64_t>()->default_value(std::to_string(18)))
+        ("x", "Short-long finimizer threshold: finimizers of at most this many characters are short. It sets the layout of the index, not the results. The table for short finimizers takes 4^x / 64 bytes (16: 67 MB, 18: 1.07 GB).",  cxxopts::value<int64_t>()->default_value(std::to_string(16)))
 	    ("k", "k-mer length.", cxxopts::value<int64_t>()->default_value(std::to_string(31)))
         ("m, meta", "Metagenome.", cxxopts::value<bool>()->default_value("false"))
         ("h,help", "Print usage");
