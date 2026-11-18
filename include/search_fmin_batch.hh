@@ -40,6 +40,10 @@ struct QueryMode
 
     uint64_t min_run = 1; // Found-in-index mode: minimum run of consecutive passing k-mers
 
+    // Relative rule (either mode), if not negative: a color must also have a score of at least
+    // top - relative, where top is the read's highest score
+    int64_t relative = -1;
+
     bool print_denominator = false; // Write found or n_pos after the read's number
 };
 
@@ -95,6 +99,13 @@ struct QueryWorker
                 {
                     denominator = found;
                     min_score = max<int64_t>(static_cast<int64_t>(found * mode.threshold_float), 1);
+                }
+                if (mode.relative >= 0)
+                {
+                    int64_t top = 0;
+                    for (uint64_t c = 0; c < index.n_colors; c++)
+                        top = max<int64_t>(top, scores[c]);
+                    min_score = max<int64_t>(min_score, top - mode.relative);
                 }
                 formatter.write(first_read + i, scores, index.n_colors, min_score, found, mode.print_denominator ? static_cast<int64_t>(denominator) : -1);
                 ws.times.count += t1 - t0;
@@ -237,6 +248,7 @@ int search_fmin_batch(int argc, char **argv)
         ("found-in-index", "Found-in-index mode: only the read's k-mers that occur in the index vote, and a color is reported if score / n_pos >= t, where n_pos is the number of those k-mers. Needs the k-mer filter made by build-filter (PREFIX.fmin.filter).")
         ("filter", "The k-mer filter file to use in found-in-index mode, if it is not PREFIX.fmin.filter.", cxxopts::value<string>())
         ("exact-kmers", "For testing the found-in-index mode: instead of the filter file, use the exact set of k-mers of the reference files listed in this file (one path per line, as given to finimizer_matrix). Takes 8 bytes per distinct k-mer.", cxxopts::value<string>())
+        ("relative", "Relative rule: report only the colors whose score is within this many k-mers of the read's highest score (score >= top - DELTA). Combines with -t: a color must pass both, so with the default -t 0 this is the relative rule alone. Works in both modes.", cxxopts::value<int64_t>())
         ("min-run", "Found-in-index mode: a k-mer that passes the filter counts only if it lies in a run of at least this many consecutive passing k-mers of the read. 1 counts every passing k-mer.", cxxopts::value<uint64_t>()->default_value("1"))
         ("print-denominator", "Write, after each read's number, the number its scores are thresholded against: found, or n_pos in found-in-index mode.")
         ("b", "Batch size, in reads", cxxopts::value<uint64_t>()->default_value("1000"))
@@ -269,6 +281,12 @@ int search_fmin_batch(int argc, char **argv)
     }
     mode.print_denominator = opts.count("print-denominator") > 0;
     const bool found_in_index = opts.count("found-in-index") > 0;
+    if (opts.count("relative"))
+    {
+        mode.relative = opts["relative"].as<int64_t>();
+        if (mode.relative < 0)
+            throw runtime_error("--relative must be at least 0");
+    }
     mode.min_run = opts["min-run"].as<uint64_t>();
     if (mode.min_run == 0)
         throw runtime_error("--min-run must be at least 1");

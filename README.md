@@ -204,6 +204,7 @@ through the k-mers' finimizers.
 | `-t` | FLOAT | 0 | Threshold, a fraction from 0 to 1. A color is reported for a read if its score is at least `floor(t * found)`, and at least 1, where `found` is the number of the read's k-mers that have a finimizer in the index. With 0, every color with a score of at least 1 is reported |
 | `-b` | INT | 1000 | Number of reads handled together in a batch. It affects speed and memory, not the results |
 | `--threads` | INT | 1 | Number of threads. Each thread handles one batch at a time; the results and their order do not depend on it |
+| `--relative` | INT | off | Relative rule: report only the colors whose score is at least the read's highest score minus this many k-mers. Combines with `-t` (a color must pass both), so with the default `-t 0` it is the relative rule alone. One sequencing error, or one difference between genomes, changes up to k scores, so `--relative 31` allows about one at k = 31 |
 | `-h, --help` | - | - | Display help message |
 
 ### Query files
