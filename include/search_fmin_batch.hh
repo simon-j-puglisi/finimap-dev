@@ -38,6 +38,8 @@ struct QueryMode
     const KmerFilter *filter = nullptr;
     double threshold = 0;
 
+    uint64_t min_run = 1; // Found-in-index mode: minimum run of consecutive passing k-mers
+
     bool print_denominator = false; // Write found or n_pos after the read's number
 };
 
@@ -72,7 +74,7 @@ struct QueryWorker
     {
         try
         {
-            find_finimizers(reads, n_reads, index.f8, index.pt, index.loaded_color_set_ids, index.get_k(), mode.filter, ws);
+            find_finimizers(reads, n_reads, index.f8, index.pt, index.loaded_color_set_ids, index.get_k(), mode.filter, ws, mode.min_run);
             for (uint64_t i = 0; i < n_reads; i++)
             {
                 const uint64_t t0 = now_ns();
@@ -235,6 +237,7 @@ int search_fmin_batch(int argc, char **argv)
         ("found-in-index", "Found-in-index mode: only the read's k-mers that occur in the index vote, and a color is reported if score / n_pos >= t, where n_pos is the number of those k-mers. Needs the k-mer filter made by build-filter (PREFIX.fmin.filter).")
         ("filter", "The k-mer filter file to use in found-in-index mode, if it is not PREFIX.fmin.filter.", cxxopts::value<string>())
         ("exact-kmers", "For testing the found-in-index mode: instead of the filter file, use the exact set of k-mers of the reference files listed in this file (one path per line, as given to finimizer_matrix). Takes 8 bytes per distinct k-mer.", cxxopts::value<string>())
+        ("min-run", "Found-in-index mode: a k-mer that passes the filter counts only if it lies in a run of at least this many consecutive passing k-mers of the read. 1 counts every passing k-mer.", cxxopts::value<uint64_t>()->default_value("1"))
         ("print-denominator", "Write, after each read's number, the number its scores are thresholded against: found, or n_pos in found-in-index mode.")
         ("b", "Batch size, in reads", cxxopts::value<uint64_t>()->default_value("1000"))
         ("threads", "Number of threads. The results do not depend on it.", cxxopts::value<uint64_t>()->default_value("1"))
@@ -266,6 +269,11 @@ int search_fmin_batch(int argc, char **argv)
     }
     mode.print_denominator = opts.count("print-denominator") > 0;
     const bool found_in_index = opts.count("found-in-index") > 0;
+    mode.min_run = opts["min-run"].as<uint64_t>();
+    if (mode.min_run == 0)
+        throw runtime_error("--min-run must be at least 1");
+    if (mode.min_run > 1 && !found_in_index)
+        throw runtime_error("--min-run is only used with --found-in-index");
     if ((opts.count("exact-kmers") || opts.count("filter")) && !found_in_index)
         throw runtime_error("--exact-kmers and --filter are only used with --found-in-index");
     if (opts.count("exact-kmers") && opts.count("filter"))
@@ -335,10 +343,10 @@ int search_fmin_batch(int argc, char **argv)
             const string path = opts.count("filter") ? opts["filter"].as<string>() : index_prefix + ".fmin.filter";
             if (!std::ifstream(path))
                 throw runtime_error("--found-in-index needs the k-mer filter " + path + ", which does not exist. Make it with: finimap build-filter -i <reference list> -o " + index_prefix);
-            auto bloom = std::make_unique<BlockedBloomFilter>(path);
-            if (bloom->get_k() != static_cast<uint64_t>(index.get_k()))
-                throw runtime_error("The k-mer filter " + path + " was built for k = " + to_string(bloom->get_k()) + ", but the index has k = " + to_string(index.get_k()));
-            filter = std::move(bloom);
+            uint64_t filter_k = 0;
+            filter = load_kmer_filter(path, filter_k);
+            if (filter_k != static_cast<uint64_t>(index.get_k()))
+                throw runtime_error("The k-mer filter " + path + " was built for k = " + to_string(filter_k) + ", but the index has k = " + to_string(index.get_k()));
         }
         mode.filter = filter.get();
         cerr << "Found-in-index mode, filter: " << filter->description() << endl;
@@ -362,6 +370,13 @@ int search_fmin_batch(int argc, char **argv)
          << ", counting colors " << seconds(summary.times.count)
          << ", formatting " << seconds(summary.times.format)
          << ", writing " << seconds(summary.write_ns) << endl;
+    if (found_in_index)
+    {
+        cerr << "K-mers that passed the filter: " << summary.times.kmers_passed;
+        if (mode.min_run > 1)
+            cerr << ", of which in runs shorter than " << mode.min_run << " (not counted): " << summary.times.kmers_in_short_runs;
+        cerr << endl;
+    }
     if (summary.times.scanned_reads > 0)
         cerr << "Reads whose finimizers did not end in order (handled by the slower picker): " << summary.times.scanned_reads << endl;
 

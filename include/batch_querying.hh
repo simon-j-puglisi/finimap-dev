@@ -33,6 +33,8 @@ struct QueryTimes
     uint64_t count = 0;   // Counting colors
     uint64_t format = 0;  // Thresholding and formatting the result lines
     uint64_t scanned_reads = 0; // Reads whose finimizers were picked by the scanning version
+    uint64_t kmers_passed = 0;  // Found-in-index mode: k-mers that passed the filter
+    uint64_t kmers_in_short_runs = 0; // ... of which dropped because their run was shorter than the minimum
 
     void add(const QueryTimes &o)
     {
@@ -43,6 +45,8 @@ struct QueryTimes
         count += o.count;
         format += o.format;
         scanned_reads += o.scanned_reads;
+        kmers_passed += o.kmers_passed;
+        kmers_in_short_runs += o.kmers_in_short_runs;
     }
 };
 
@@ -191,9 +195,12 @@ inline void pick_finimizers(BatchWorkspace &ws, const uint64_t off, const uint64
 // the finimizers of read i's k-mers are ws.finimizers[ws.finimizers_start[i] .. ws.finimizers_start[i+1]).
 //
 // With a filter (found-in-index mode), only the k-mers that pass it get a finimizer, and
-// ws.n_passed[i] is the number of read i's k-mers that passed.
+// ws.n_passed[i] is the number of read i's k-mers that passed. With min_run > 1, a k-mer that
+// passes counts only if it lies in a run of at least min_run consecutive passing k-mers of the
+// read; the ends of the read and k-mers with a character that is not a nucleotide end a run.
 inline void find_finimizers(const std::vector<std::string> &reads, const uint64_t n_reads, const Fluke8 &f8, const PrefTab &ptab,
-                            const Array<uint64_t> &color_set_ids, const uint64_t k, const KmerFilter *filter, BatchWorkspace &ws)
+                            const Array<uint64_t> &color_set_ids, const uint64_t k, const KmerFilter *filter, BatchWorkspace &ws,
+                            const uint64_t min_run = 1)
 {
     uint64_t t0 = now_ns();
 
@@ -250,6 +257,33 @@ inline void find_finimizers(const std::vector<std::string> &reads, const uint64_
         }
         ws.kmer_passed.resize(ws.kmers.size());
         filter->test(ws.kmers.data(), ws.kmers.size(), ws.kmer_passed.data());
+
+        // The k-mers of a read are listed in order of position, and the reads one after another
+        const uint64_t n_kmers = ws.kmers.size();
+        uint64_t run_read = 0;
+        for (uint64_t i = 0; i < n_kmers;)
+        {
+            if (!ws.kmer_passed[i])
+            {
+                i++;
+                continue;
+            }
+            // The maximal run of passing k-mers that starts at i
+            while (ws.kmer_pos[i] >= ws.read_start[run_read + 1])
+                run_read++;
+            uint64_t end = i + 1;
+            while (end < n_kmers && ws.kmer_passed[end] && ws.kmer_pos[end] == ws.kmer_pos[end - 1] + 1 &&
+                   ws.kmer_pos[end] < ws.read_start[run_read + 1])
+                end++;
+            ws.times.kmers_passed += end - i;
+            if (end - i < min_run)
+            {
+                ws.times.kmers_in_short_runs += end - i;
+                for (uint64_t j = i; j < end; j++)
+                    ws.kmer_passed[j] = 0;
+            }
+            i = end;
+        }
 
         ws.pass.assign(total, 0);
         uint64_t ri = 0;
