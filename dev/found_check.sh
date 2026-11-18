@@ -1,6 +1,6 @@
 #!/bin/bash -l
-# The found-in-index mode at scale: build k-mer filters of several sizes (timed), then run
-# every query file in the default mode and in the found-in-index mode with each filter and
+# The found-in-index mode at scale: build k-mer filters (timed), then run every query file in
+# the default mode and in the found-in-index mode with each filter, minimum run length and
 # threshold (timed), and report times, n_pos and how many colours are reported.
 # The index, the reference files and the query files are only read. Safe to resubmit.
 #
@@ -11,11 +11,17 @@
 #   FM_QUERIES   directory of query files *.fna (required; *.templates.fna are ignored)
 #   FM_REF_OUT   directory with reference results of the default mode, NAME.txt (optional)
 #   FM_OUT       output directory (default: the current directory)
-#   FM_FILTERS   filters to build, as "bits:hashes" pairs (default "10:6 16:8 24:10")
+#   FM_FILTERS   filters to build: "bits:hashes" pairs for Bloom filters, and "exact" for the
+#                exact k-mer table (default "10:6 16:8 24:10")
+#   FM_MIN_RUNS  values of --min-run (default "1")
 #   FM_TAUS      thresholds for the found-in-index mode (default "0.8 0.9 0.96 1")
 #   FM_TAU       threshold for the default mode (default 0.8)
 #   FM_K         k of the index (default 31); the filters are built with the same k
 #   FM_CMAKE_MODULE, FM_GCC_MODULE   as in stage2.sh
+#
+# Outputs: default/NAME.txt, and found/NAME.F.rR.tTAU.txt for filter F (b10, b16, ..., or
+# exact), minimum run R and threshold TAU, written with --print-denominator: the second field
+# of each line is n_pos.
 set -euo pipefail
 export LC_ALL=C
 
@@ -26,6 +32,7 @@ QUERIES=$(readlink -f "${FM_QUERIES:?set FM_QUERIES}")
 REF_OUT=${FM_REF_OUT:-}
 OUT=$(readlink -f "${FM_OUT:-$PWD}")
 FILTERS=${FM_FILTERS:-10:6 16:8 24:10}
+MIN_RUNS=${FM_MIN_RUNS:-1}
 TAUS=${FM_TAUS:-0.8 0.9 0.96 1}
 TAU=${FM_TAU:-0.8}
 K=${FM_K:-31}
@@ -33,7 +40,7 @@ JOBS=${SLURM_CPUS_PER_TASK:-4}
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
 
 echo "FM_FOUND_CHECK start host=$(hostname) date=$(date '+%F %T')"
-echo "repo=$REPO commit=$COMMIT index=$INDEX refs=$REFS ($(wc -l < "$REFS") files) queries=$QUERIES out=$OUT k=$K filters='$FILTERS' taus='$TAUS' threads=$JOBS"
+echo "repo=$REPO commit=$COMMIT index=$INDEX refs=$REFS ($(wc -l < "$REFS") files) queries=$QUERIES out=$OUT k=$K filters='$FILTERS' min_runs='$MIN_RUNS' taus='$TAUS' threads=$JOBS"
 [ -e "$REPO/dev/timeit.py" ] || { echo "FM_ERROR repo not found at $REPO"; exit 1; }
 [ -s "$INDEX.fmin" ] || { echo "FM_ERROR index not found: $INDEX.fmin"; exit 1; }
 mkdir -p "$OUT/default" "$OUT/found"
@@ -48,23 +55,26 @@ BIN=$OUT/finimap
 if [ ! -e "$(head -n 1 "$REFS")" ]; then cd "$(dirname "$REFS")"; fi
 [ -e "$(head -n 1 "$REFS")" ] || { echo "FM_ERROR first reference not found: $(head -n 1 "$REFS")"; exit 1; }
 
+name_of() { if [ "$1" = exact ]; then echo exact; else echo "b${1%:*}"; fi; }
+
 echo "--- building the filters"
 distinct=""
 for f in $FILTERS; do
-    bits=${f%:*}; hashes=${f#*:}
-    P=$OUT/filter_$bits
+    F=$(name_of "$f")
+    P=$OUT/filter_$F
     if [ -s "$P.time.txt" ] && grep -q '^exit_code 0$' "$P.time.txt" && [ -s "$P.fmin.filter" ]; then
-        echo "filter with $bits bits per k-mer: already built"
+        echo "filter $F: already built"
     else
         # The first build estimates the number of distinct k-mers; the others reuse it
         extra=""; [ -z "$distinct" ] || extra="--distinct-kmers $distinct"
+        if [ "$f" = exact ]; then kind="--exact"; else kind="--bits-per-kmer ${f%:*} --hashes ${f#*:}"; fi
         python3 "$REPO/dev/timeit.py" "$P.time.part" "$BIN" build-filter -i "$REFS" -o "$P" -k "$K" \
-            --bits-per-kmer "$bits" --hashes "$hashes" --threads "$JOBS" $extra 2> "$P.log" \
+            $kind --threads "$JOBS" $extra 2> "$P.log" \
             || { echo "FM_ERROR build-filter failed:"; tail -n 5 "$P.log"; exit 1; }
         mv "$P.time.part" "$P.time.txt"
     fi
     [ -n "$distinct" ] || distinct=$(grep -oE 'about [0-9]+' "$P.log" | grep -oE '[0-9]+' | head -n 1)
-    echo "bits=$bits hashes=$hashes | $(grep -E 'Distinct|False-positive|Time \(s\)|Wrote' "$P.log" | tr '\n' '|') $(tr '\n' ' ' < "$P.time.txt")"
+    echo "$F | $(grep -E 'Distinct|False-positive|Time \(s\)|Wrote' "$P.log" | tr '\n' '|') $(tr '\n' ' ' < "$P.time.txt")"
 done
 cd "$OUT"
 
@@ -86,9 +96,11 @@ for q in "$QUERIES"/*.fna; do
     n_files=$((n_files + 1))
     run "default/$name" -q "$q" -t "$TAU"
     for f in $FILTERS; do
-        bits=${f%:*}
-        for t in $TAUS; do
-            run "found/$name.b$bits.t$t" -q "$q" -t "$t" --found-in-index --filter "$OUT/filter_$bits.fmin.filter" --print-denominator
+        F=$(name_of "$f")
+        for R in $MIN_RUNS; do
+            for t in $TAUS; do
+                run "found/$name.$F.r$R.t$t" -q "$q" -t "$t" --found-in-index --filter "$OUT/filter_$F.fmin.filter" --min-run "$R" --print-denominator
+            done
         done
     done
 done
@@ -96,10 +108,11 @@ done
 echo "ran $n_files query files"
 
 echo "--- report"
-python3 - "$QUERIES" "$OUT" "$REF_OUT" "$FILTERS" "$TAUS" <<'PY'
+python3 - "$QUERIES" "$OUT" "$REF_OUT" "$FILTERS" "$MIN_RUNS" "$TAUS" <<'PY'
 import os, re, sys
-queries, out, ref_out, filters, taus = sys.argv[1:6]
-bits = [f.split(":")[0] for f in filters.split()]
+queries, out, ref_out, filters, min_runs, taus = sys.argv[1:7]
+names_f = ["exact" if f == "exact" else "b" + f.split(":")[0] for f in filters.split()]
+min_runs = min_runs.split()
 taus = taus.split()
 
 def field(path, key):
@@ -111,6 +124,15 @@ def field(path, key):
 def part(path, label):
     m = re.search(label + r" ([0-9.]+)", open(path).read())
     return m.group(1) if m else "n/a"
+
+def summary(path):
+    n_pos = pairs = hit_reads = 0
+    for l in open(path):
+        p = l.split()
+        n_pos += int(p[1])
+        pairs += len(p) - 2
+        hit_reads += len(p) > 2
+    return n_pos, pairs, hit_reads
 
 names = sorted(n[:-4] for n in os.listdir(queries) if n.endswith(".fna") and not n.endswith(".templates.fna"))
 unexpected = 0
@@ -124,21 +146,21 @@ for name in names:
         unexpected += differ
         line += " lines_differing_from_reference=%d" % differ
     print(line)
-    n_kmers = None
-    for b in bits:
-        cells = []
-        for t in taus:
-            f = os.path.join(out, "found", "%s.b%s.t%s" % (name, b, t))
-            n_pos = pairs = hit_reads = 0
-            for l in open(f + ".txt"):
-                p = l.split()
-                n_pos += int(p[1])
-                pairs += len(p) - 2
-                hit_reads += len(p) > 2
-            cells.append("t=%s pairs=%d reads_with_a_colour=%d" % (t, pairs, hit_reads))
-        f0 = os.path.join(out, "found", "%s.b%s.t%s" % (name, b, taus[0]))
-        print("  bits=%s n_pos_total=%d wall_s=%s search_s=%s filter_s=%s lookups_s=%s | %s"
-              % (b, n_pos, field(f0 + ".time.txt", "wall_s"), part(f0 + ".stderr", "search"), part(f0 + ".stderr", "k-mer filter"), part(f0 + ".stderr", "finimizer lookups"), " | ".join(cells)))
+    for R in min_runs:
+        exact_npos = None
+        if "exact" in names_f:
+            exact_npos = summary(os.path.join(out, "found", "%s.exact.r%s.t%s.txt" % (name, R, taus[0])))[0]
+        for F in names_f:
+            cells = []
+            for t in taus:
+                n_pos, pairs, hit_reads = summary(os.path.join(out, "found", "%s.%s.r%s.t%s.txt" % (name, F, R, t)))
+                cells.append("t=%s reads_with_a_colour=%d pairs=%d" % (t, hit_reads, pairs))
+            f0 = os.path.join(out, "found", "%s.%s.r%s.t%s" % (name, F, R, taus[0]))
+            m = re.search(r"passed the filter: ([0-9]+)(?:, of which in runs shorter than [0-9]+ \(not counted\): ([0-9]+))?", open(f0 + ".stderr").read())
+            passed, dropped = (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+            excess = "" if exact_npos is None else " excess_over_exact=%d" % (n_pos - exact_npos)
+            print("  %s r=%s n_pos_total=%d%s passed=%d dropped_by_min_run=%d wall_s=%s search_s=%s filter_s=%s | %s"
+                  % (F, R, n_pos, excess, passed, dropped, field(f0 + ".time.txt", "wall_s"), part(f0 + ".stderr", "search"), part(f0 + ".stderr", "k-mer filter"), " | ".join(cells)))
 print("FM_FOUND_TOTAL files=%d default_lines_differing_from_reference=%d" % (len(names), unexpected))
 PY
 ls -l "$OUT"/filter_*.fmin.filter "$INDEX.fmin" | awk '{print $5, $9}'

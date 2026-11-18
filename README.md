@@ -307,11 +307,21 @@ not in the index passes with the false-positive probability. Such a k-mer is cou
 read's true genomes. With thresholds near 1 this matters: one such k-mer is enough to drop a
 genome at `-t 1`. Use a larger filter for high thresholds.
 
+A filter false positive usually stands alone: the k-mers on both sides of it fail. K-mers
+that are truly in the index come in runs, between sequencing errors. `--min-run R` counts a
+k-mer that passes only if it lies in a run of at least `R` consecutive passing k-mers of the
+read (the ends of the read, and k-mers with a character other than A, C, G, T, end a run). With
+`--min-run 2`, nearly all false positives are dropped, at the cost of the rare true k-mer that
+stands alone.
+
 Other options of `search-fmin` for this mode:
 
 - `--filter FILE` uses a filter file other than `PREFIX.fmin.filter`.
 - `--exact-kmers FILE_LIST` uses, instead of the filter file, the exact set of k-mers of the
   reference files, built at query time. It is for testing on small collections.
+- For an exact membership test on a large collection, `build-filter --exact` writes an exact
+  k-mer table instead of a Bloom filter (16 to 32 bytes per k-mer; `--filter-file` names the
+  file), and `--filter` uses it like any filter.
 - `--print-denominator` (in either mode) writes, after each read's number, the number its
   scores are thresholded against.
 
