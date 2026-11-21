@@ -9,6 +9,7 @@
 
 #include "deltaset.hpp"
 #include "mapped_array.hh"
+#include "packed_ints.hh"
 
 using namespace std;
 
@@ -24,7 +25,7 @@ private:
     // After load() the bitmaps and the lists are read from here, and BV and L stay empty
     bool loaded = false;
     Array<uint64_t> loaded_BV;
-    Array<uint16_t> loaded_L;
+    PackedInts loaded_L;
 
 public:
     const DeltaSet &getEF() const { return EF; }
@@ -34,9 +35,12 @@ public:
     {
         return loaded ? loaded_BV.data() : reinterpret_cast<const Array<uint64_t>::element *>(BV.data());
     }
-    const Array<uint16_t>::element *list_colors() const
+    // Only in a loaded index
+    const PackedInts &list_colors() const
     {
-        return loaded ? loaded_L.data() : reinterpret_cast<const Array<uint16_t>::element *>(L.data());
+        if (!loaded)
+            throw std::logic_error("The color lists are read only from a loaded index");
+        return loaded_L;
     }
     uint64_t sparse_count = 0;
     uint64_t dense_count = 0;
@@ -379,7 +383,7 @@ public:
         if (dense_count - (sparse_count) > 0) cerr << "very dense sizes max = " << max_dense << endl;
     }
 
-    void serialize(std::ostream &out) const
+    void serialize(std::ostream &out, const uint64_t format) const
     {
 
         // counts
@@ -390,12 +394,24 @@ public:
         // EF
         EF.serialize(out);
         // L
-        size_t L_size = L.size();
-        out.write(reinterpret_cast<const char *>(&L_size), sizeof(L_size));
-        out.write(reinterpret_cast<const char *>(L.data()), L_size * sizeof(uint16_t));
+        if (format >= 3)
+        {
+            uint64_t max_color = 0;
+            for (uint16_t c : L)
+                max_color = std::max<uint64_t>(max_color, c);
+            PackedInts packed;
+            packed.build(L.data(), L.size(), PackedInts::bits_for(max_color));
+            packed.serialize(out);
+        }
+        else
+        {
+            size_t L_size = L.size();
+            out.write(reinterpret_cast<const char *>(&L_size), sizeof(L_size));
+            out.write(reinterpret_cast<const char *>(L.data()), L_size * sizeof(uint16_t));
+        }
     }
 
-    void load(std::istream &in)
+    void load(std::istream &in, const uint64_t format)
     {
 
         // counts
@@ -410,9 +426,16 @@ public:
         // EF
         EF.load(in);
         // L
-        size_t L_size = 0;
-        in.read(reinterpret_cast<char *>(&L_size), sizeof(L_size));
-        loaded_L.load(in, L_size);
+        if (format >= 3)
+        {
+            loaded_L.load(in);
+        }
+        else
+        {
+            size_t L_size = 0;
+            in.read(reinterpret_cast<char *>(&L_size), sizeof(L_size));
+            loaded_L.load_plain(in, L_size, sizeof(uint16_t));
+        }
         loaded = true;
     }
 

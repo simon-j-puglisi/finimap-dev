@@ -21,7 +21,7 @@ def report(prefix):
         fmt = 1
         if f.read(8) == b"FINIMAP!":
             fmt = u64(f)
-            if fmt != 2:
+            if fmt not in (2, 3):
                 sys.exit("%s: index format %d is not known to this script" % (path, fmt))
         else:
             f.seek(0)
@@ -30,10 +30,16 @@ def report(prefix):
         skip("color sets: bitmaps (dense sets)", (bits + 63) // 64 * 8, "%d bits" % bits)
         ef_n, ef_period = u64(f), u64(f)
         skip("color sets: list offsets", (ef_n // ef_period + 1) * 8 + ef_n * 2, "%d lists" % ef_n)
-        l_size = u64(f)
-        skip("color sets: lists (sparse sets, complements of very dense ones)", l_size * 2, "%d colors listed" % l_size)
-        n_ids = u64(f)
-        skip("color set id of each finimizer", n_ids * 8, "%d finimizers" % n_ids)
+        if fmt >= 3:
+            l_size, l_bits, l_bytes = u64(f), u64(f), u64(f)
+            skip("color sets: lists (sparse sets, complements of very dense ones)", l_bytes, "%d colors listed, %d bits each" % (l_size, l_bits))
+            n_ids, id_bits, id_bytes = u64(f), u64(f), u64(f)
+            skip("color set id of each finimizer", id_bytes, "%d finimizers, %d bits each" % (n_ids, id_bits))
+        else:
+            l_size = u64(f)
+            skip("color sets: lists (sparse sets, complements of very dense ones)", l_size * 2, "%d colors listed" % l_size)
+            n_ids = u64(f)
+            skip("color set id of each finimizer", n_ids * 8, "%d finimizers" % n_ids)
         f8_u, f8_n, f8_min, upperlen, lowerlen = [u64(f) for _ in range(5)]
         if fmt == 1:
             p_u, p_n, p_min, nblocks = [u64(f) for _ in range(4)]
@@ -48,7 +54,11 @@ def report(prefix):
             skip("short finimizers: bucket table, Pino counts", h2 * 4)
             l = u64(f)
             skip("short finimizers: low bytes", l, "%d short finimizers (length <= %d)" % (p_n, upperlen))
-        skip("short finimizers: lengths", f8_n)
+        if fmt >= 3:
+            len_n, len_bits, len_bytes = u64(f), u64(f), u64(f)
+            skip("short finimizers: lengths", len_bytes, "%d bits each" % len_bits)
+        else:
+            skip("short finimizers: lengths", f8_n)
         preflen, nprefs, nfins = u64(f), u64(f), u64(f)
         skip("long finimizers: prefix table (size set by -p)", (nprefs + 1) * 4, "%d prefixes of length %d" % (nprefs, preflen))
         skip("long finimizers: keys", nfins * 8, "%d long finimizers" % nfins)

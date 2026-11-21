@@ -1,7 +1,8 @@
 // Checks the Pino structure and the short-finimizer lookups built on it.
 //  1. Pino::predecessor and Pino::in_bucket against a sorted array, on random sets of many
 //     densities (equal elements included).
-//  2. Fluke8::finiLookup with Pino against Fluke8::finiLookup with Pred8v2 (index format 1),
+//  2. PackedInts at every width, against the values packed.
+//  3. Fluke8::finiLookup with Pino against Fluke8::finiLookup with Pred8v2 (index format 1),
 //     on random prefix-free sets of strings, as the short finimizers are.
 // Build from the repository root:
 //   g++ -std=c++2a -O2 -march=native -I include -o dev/checks/pino_check dev/checks/pino_check.cpp
@@ -232,6 +233,34 @@ static void check_fluke(int rounds)
     }
 }
 
+static void check_packed()
+{
+    for (uint64_t w = 1; w <= 64; w++)
+    {
+        if (w > 57 && w < 64)
+            continue; // not a width PackedInts uses
+        for (uint64_t n : {0ULL, 1ULL, 7ULL, 8ULL, 9ULL, 1000ULL})
+        {
+            std::vector<uint64_t> v(n);
+            const uint64_t mask = w == 64 ? ~0ULL : (1ULL << w) - 1;
+            for (auto &x : v)
+                x = rng() & mask;
+            if (n > 0)
+                v[n - 1] = mask; // the largest value, at the end
+            PackedInts p;
+            p.build(v.data(), n, w);
+            for (uint64_t i = 0; i < n; i++)
+                if (p[i] != v[i])
+                {
+                    fail("PackedInts width " + std::to_string(w) + " index " + std::to_string(i));
+                    break;
+                }
+        }
+    }
+    if (PackedInts::bits_for(0) != 1 || PackedInts::bits_for(1) != 1 || PackedInts::bits_for(2) != 2 || PackedInts::bits_for(4725954) != 23 || PackedInts::bits_for(~0ULL) != 64 || PackedInts::bits_for(1ULL << 57) != 64 || PackedInts::bits_for((1ULL << 57) - 1) != 57)
+        fail("PackedInts::bits_for");
+}
+
 int main(int argc, char **argv)
 {
     int rounds = argc > 1 ? std::atoi(argv[1]) : 30;
@@ -239,6 +268,9 @@ int main(int argc, char **argv)
     check_pino(rounds);
     std::cout << "Pino against a sorted array: " << (failures ? "FAILED" : "ok") << "\n";
     int before = failures;
+    check_packed();
+    std::cout << "PackedInts: " << (failures > before ? "FAILED" : "ok") << "\n";
+    before = failures;
     check_fluke(rounds * 4);
     std::cout << "Lookups with Pino against Pred8v2: " << (failures > before ? "FAILED" : "ok") << " (" << n_found_all << " lookups found a finimizer, " << n_cross << " of them in an earlier bucket than the key's)\n";
     return failures ? 1 : 0;

@@ -123,7 +123,7 @@ public:
         }
 
         const Array<uint64_t>::element *data = CCS.bitmap_words();
-        const Array<uint16_t>::element *L = CCS.list_colors();
+        const PackedInts &L = CCS.list_colors();
         const DeltaSet &EF = CCS.getEF();
 
         // ids below sparse_count are sparse sets, then very dense sets up to dense_count,

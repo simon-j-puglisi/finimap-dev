@@ -145,7 +145,7 @@ cd ..
 | `-x` | INT | 16 | Short/long finimizer threshold, in characters (1 to 19). Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
 | `-m, --meta` | BOOL | false | Set to `true` for metagenomic indexes (multiple reference genomes) |
-| `--index-format` | INT | 2 | Index format to write. 1 is the format of earlier versions of Finimap, kept for comparison; `search-fmin` reads both |
+| `--index-format` | INT | 3 | Index format to write. 1 and 2 are the formats of earlier versions of Finimap, kept for comparison; `search-fmin` reads all three |
 | `-h, --help` | - | - | Display help message |
 
 #### Parameter Tuning
@@ -163,14 +163,19 @@ cd ..
 
 #### Index formats
 
-- **Format 2** (the default) stores the short finimizers in a Pino structure (*Faster
-  Small-Alphabet Subset Rank Queries*, Section 4.2): the byte of low bits of each finimizer,
-  and the start of each bucket of 256 values coded in about 9 bits instead of a 32-bit pointer.
-  The file starts with the signature `FINIMAP!` and the format number.
+- **Format 3** (the default) is format 2 with three arrays packed in as many bits as their
+  values need: the color set id of each finimizer (23 bits instead of 64 for 3,498 *E. coli*
+  genomes), the colors of the listed color sets (12 bits instead of 16 below 4,096 colors), and
+  the lengths of the short finimizers (4 bits instead of 8 at `-x 16`).
+- **Format 2** stores the short finimizers in a Pino structure (*Faster Small-Alphabet Subset
+  Rank Queries*, Section 4.2): the byte of low bits of each finimizer, and the start of each
+  bucket of 256 values coded in about 9 bits instead of a 32-bit pointer. Files of format 2
+  and later start with the signature `FINIMAP!` and the format number.
 - **Format 1** is the format of earlier versions, with a 32-bit pointer per bucket (4^x / 64
-  bytes). It has no signature. `build-fmin --index-format 1` still writes it, byte for byte as
-  before.
-- Both give the same results. `dev/index_sizes.py` reports the size of each part of either.
+  bytes). It has no signature.
+- `build-fmin --index-format 1` or `2` still writes those formats, byte for byte as before.
+  All three give the same results. `dev/index_sizes.py` reports the size of each part of any
+  of them.
 
 #### Examples
 

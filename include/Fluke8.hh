@@ -19,6 +19,7 @@
 
 #include "Pred8v2.hh"
 #include "Pino.hh"
+#include "packed_ints.hh"
 #include "Util.hh"
 
 using namespace std;
@@ -77,14 +78,16 @@ class Fluke8 {
        is.seekg(0);
 
        cerr << "\tMaking third pass...\n";
-       _lengths.resize(_n);
-       uint64_t i=0;
+       vector<uint8_t> lengths;
+       lengths.reserve(_n);
        while (std::getline(is, line)) {
           if(line.length() >= lowerlen && line.length() <= upperlen){
-             _lengths[i++] = line.length();
+             lengths.push_back(line.length());
           }
        }
        is.close();
+       _lengths.build(lengths.data(), lengths.size(), 8);
+       _len_offset = 0;
     }
 
 
@@ -115,11 +118,12 @@ class Fluke8 {
           _pino = Pino(data);
           _use_pino = true;
        }
-       _lengths.resize(_n);
-       for(uint64_t i=0;i<_n;i++){
-          _lengths[i] = lengths[i];
-       }
+       _lengths.build(lengths.data(), lengths.size(), 8);
+       _len_offset = 0;
     }
+
+    // The length of short finimizer i
+    uint64_t length(const uint64_t i) const { return _lengths[i] + _len_offset; }
 
     // Looks up the short finimizer that is a prefix of key (2 bits a character, from the top
     // bit), of at most len characters. Returns its rank and length, or {-1, 0}.
@@ -135,8 +139,9 @@ class Fluke8 {
           lcp = lcp >> ((uint64_t)1); //lcp is now in symbols
           //cerr << "key: " << key << " lcp: "<<lcp<<" _lengths[p.first]: "<<((uint64_t)_lengths[p.first])<<" len: "<<len<<'\n';
           //cerr << ((lcp >= _lengths[p.first]) ? '*' : ' ') << '\n';
-          if(lcp >= _lengths[p.first] && _lengths[p.first] <= len){
-             return {p.first,_lengths[p.first]};
+          const uint64_t flen = length(p.first);
+          if(lcp >= flen && flen <= len){
+             return {p.first,flen};
           }
        }
        return {-1,0};
@@ -150,7 +155,7 @@ class Fluke8 {
        bool known;
        const int64_t idx = _pino.predecessor(cle, value, known);
        if(idx < 0) return {-1,0};
-       const uint64_t flen = _lengths[idx];
+       const uint64_t flen = length(idx);
        if(flen > len) return {-1,0};
        // The finimizer matches if its first flen characters are those of key. As it is padded
        // with zeros, its value must then be the following.
@@ -187,7 +192,7 @@ class Fluke8 {
         return sz;
     }
 
-    int64_t serialize(std::ostream& os) const{
+    int64_t serialize(std::ostream& os, const uint64_t format) const{
         cerr << "Fluke8.serialize()...\n";
         int64_t written = 0;
         os.write((char *)&_u, sizeof(uint64_t));
@@ -198,8 +203,28 @@ class Fluke8 {
         cerr << "_u _n _min _upperlen _lowerlen: "<<_u<<' '<<_n<<' '<<_min<<' '<<_upperlen<<' '<<_lowerlen<<'\n';
         if(_use_pino) _pino.serialize(os);
         else _pred8.serialize(os);
-        os.write((char *)_lengths.data(), _n*sizeof(uint8_t));
-        written += 5*sizeof(uint64_t) + (_use_pino ? _pino.sizeInBytes() : _pred8.sizeInBytes()) + _n;
+        if(format >= 3){
+           // Format 3: the lengths minus 1, in as many bits as they need
+           vector<uint64_t> lm1(_n);
+           uint64_t max_lm1 = 0;
+           for(uint64_t i=0;i<_n;i++){
+              const uint64_t l = length(i);
+              if(l == 0) throw std::logic_error("Fluke8: a finimizer of length 0");
+              lm1[i] = l - 1;
+              max_lm1 = std::max(max_lm1, l - 1);
+           }
+           PackedInts packed;
+           packed.build(lm1.data(), _n, PackedInts::bits_for(max_lm1));
+           cerr << "Short finimizer lengths: " << packed.bits() << " bits each" << endl;
+           packed.serialize(os);
+           written += packed.size_in_bytes() + 3*sizeof(uint64_t);
+        }else{
+           vector<uint8_t> lengths(_n);
+           for(uint64_t i=0;i<_n;i++) lengths[i] = (uint8_t)length(i);
+           os.write((const char *)lengths.data(), _n);
+           written += _n;
+        }
+        written += 5*sizeof(uint64_t) + (_use_pino ? _pino.sizeInBytes() : _pred8.sizeInBytes());
         return written;
     }
 
@@ -219,7 +244,14 @@ class Fluke8 {
        }else{
           _pred8.load(is);
        }
-       _lengths.load(is, _n);
+       if(format_version >= 3){
+          _lengths.load(is);
+          _len_offset = 1;
+          if(is && _lengths.size() != _n) throw std::runtime_error("The index is inconsistent (lengths of short finimizers)");
+       }else{
+          _lengths.load_plain(is, _n, 1);
+          _len_offset = 0;
+       }
     }
     
 //    Fluke8(Fluke8 &other){
@@ -249,7 +281,8 @@ class Fluke8 {
     uint64_t _min = 0;  // value of the smallest element
     uint64_t _upperlen = 0;  // universe size
     uint64_t _lowerlen = 0;  // number of elements
-    Array<uint8_t> _lengths;
+    PackedInts _lengths;     // length - _len_offset of each short finimizer
+    uint64_t _len_offset = 0;
 };
 
 #endif

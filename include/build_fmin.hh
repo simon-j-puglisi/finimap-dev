@@ -14,7 +14,7 @@ int build_fmin(int argc, char **argv)
         ("x", "Short-long finimizer threshold: finimizers of at most this many characters are short. It sets the layout of the index, not the results. The bucket table for short finimizers takes about 4^x / 228 bytes (16: 19 MB, 18: 302 MB; in index format 1, 4^x / 64 bytes).",  cxxopts::value<int64_t>()->default_value(std::to_string(16)))
 	    ("k", "k-mer length.", cxxopts::value<int64_t>()->default_value(std::to_string(31)))
         ("m, meta", "Metagenome.", cxxopts::value<bool>()->default_value("false"))
-        ("index-format", "Index format to write: 2 (current) or 1 (that of earlier versions of Finimap, for comparison).", cxxopts::value<int64_t>()->default_value(std::to_string(INDEX_FORMAT)))
+        ("index-format", "Index format to write: 3 (current), or 2 or 1 (those of earlier versions of Finimap, for comparison).", cxxopts::value<int64_t>()->default_value(std::to_string(INDEX_FORMAT)))
         ("h,help", "Print usage");
 
     int64_t old_argc = argc; // Must store this because the parser modifies it

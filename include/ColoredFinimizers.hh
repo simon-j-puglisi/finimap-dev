@@ -12,6 +12,7 @@
 #include "CompressedColorSets.hh"
 
 #include "Fluke8.hh"
+#include "packed_ints.hh"
 #include "PrefTab.hh"
 #include "mapped_array.hh"
 
@@ -49,8 +50,9 @@ constexpr uint64_t MAX_K = 31;
 // format 1 have no signature: they start with the number of sparse color sets, which is far
 // smaller than the signature read as a number.
 constexpr char INDEX_SIGNATURE[8] = {'F', 'I', 'N', 'I', 'M', 'A', 'P', '!'};
-// 1: short finimizers in Pred8v2; 2: in Pino
-constexpr uint64_t INDEX_FORMAT = 2;
+// 1: short finimizers in Pred8v2; 2: in Pino; 3: also the color set ids, the lists of colors and
+// the lengths of the short finimizers packed in as many bits as they need
+constexpr uint64_t INDEX_FORMAT = 3;
 
 // Colored finimizers without much compression
 class ColoredFinimizers
@@ -200,7 +202,7 @@ public:
     PrefTab pt;
 
     vector<uint64_t> color_set_ids;       // The color set of each finimizer, while the index is built
-    Array<uint64_t> loaded_color_set_ids; // The same, in a loaded index
+    PackedInts loaded_color_set_ids;      // The same, in a loaded index
     std::shared_ptr<MappedFile> mapping;  // The index file, if it is loaded by mapping it
 
     int get_k() const { return k; }
@@ -512,13 +514,26 @@ public:
             out.write(INDEX_SIGNATURE, sizeof(INDEX_SIGNATURE));
             out.write(reinterpret_cast<const char *>(&format), sizeof(format));
         }
-        CCS.serialize(out);
+        CCS.serialize(out, format);
 
-        uint64_t color_set_ids_size = color_set_ids.size();
-        out.write(reinterpret_cast<const char *>(&color_set_ids_size), sizeof(uint64_t));
-        out.write(reinterpret_cast<const char *>(color_set_ids.data()), color_set_ids_size * sizeof(uint64_t));
+        if (format >= 3)
+        {
+            uint64_t max_id = 0;
+            for (uint64_t id : color_set_ids)
+                max_id = std::max(max_id, id);
+            PackedInts packed;
+            packed.build(color_set_ids.data(), color_set_ids.size(), PackedInts::bits_for(max_id));
+            cerr << "Color set ids: " << packed.bits() << " bits each" << endl;
+            packed.serialize(out);
+        }
+        else
+        {
+            uint64_t color_set_ids_size = color_set_ids.size();
+            out.write(reinterpret_cast<const char *>(&color_set_ids_size), sizeof(uint64_t));
+            out.write(reinterpret_cast<const char *>(color_set_ids.data()), color_set_ids_size * sizeof(uint64_t));
+        }
 
-        f8.serialize(out);
+        f8.serialize(out, format);
         pt.serialize(out);
 
         // metadata
@@ -581,13 +596,19 @@ public:
             }
             cerr << "Index format: " << format << endl;
 
-            CCS.load(in);
+            CCS.load(in, format);
 
-            uint64_t color_set_ids_size;
-            in.read(reinterpret_cast<char *>(&color_set_ids_size), sizeof(uint64_t));
-            cerr << "color_set_ids_size: " << color_set_ids_size << endl; // Do we need this?
-
-            loaded_color_set_ids.load(in, color_set_ids_size);
+            if (format >= 3)
+            {
+                loaded_color_set_ids.load(in);
+            }
+            else
+            {
+                uint64_t color_set_ids_size;
+                in.read(reinterpret_cast<char *>(&color_set_ids_size), sizeof(uint64_t));
+                loaded_color_set_ids.load_plain(in, color_set_ids_size, sizeof(uint64_t));
+            }
+            cerr << "color_set_ids_size: " << loaded_color_set_ids.size() << " (" << loaded_color_set_ids.bits() << " bits each)" << endl;
 
             f8.load(in, format);
             pt.load(in);
