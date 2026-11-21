@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstring>
 #include <memory>
 #include <vector>
 #include <optional>
@@ -43,6 +44,13 @@ void print_search_timing_stats()
 constexpr uint64_t MAX_COLORS = 65535;
 // Finimizers are looked up through 62-bit keys, two bits per character
 constexpr uint64_t MAX_K = 31;
+
+// Index files of format 2 and later start with this signature and the format number. Files of
+// format 1 have no signature: they start with the number of sparse color sets, which is far
+// smaller than the signature read as a number.
+constexpr char INDEX_SIGNATURE[8] = {'F', 'I', 'N', 'I', 'M', 'A', 'P', '!'};
+// 1: short finimizers in Pred8v2; 2: in Pino
+constexpr uint64_t INDEX_FORMAT = 2;
 
 // Colored finimizers without much compression
 class ColoredFinimizers
@@ -186,6 +194,7 @@ public:
     uint64_t short_long_t;
     uint64_t k;
     bool meta;
+    uint64_t format = INDEX_FORMAT; // The format of the file written or loaded
 
     Fluke8 f8;
     PrefTab pt;
@@ -198,8 +207,11 @@ public:
 
     CompressedColoredFinimizers() = default;
 
-    CompressedColoredFinimizers(ColoredFinimizers &&cf, int64_t prefix_len, int64_t short_long_t, uint64_t kmer_size, bool meta)
+    CompressedColoredFinimizers(ColoredFinimizers &&cf, int64_t prefix_len, int64_t short_long_t, uint64_t kmer_size, bool meta, uint64_t format = INDEX_FORMAT)
     {
+        if (format < 1 || format > INDEX_FORMAT)
+            throw std::runtime_error("Unknown index format " + to_string(format));
+        this->format = format;
         cerr << "Let's compress it!" << endl;
         this->plen = prefix_len;
         cerr << "Prefix length: " << plen << endl;
@@ -301,7 +313,7 @@ public:
         
 
         // build fluke
-        this->f8 = std::move(Fluke8(short_fmins, 0, short_long_t));
+        this->f8 = std::move(Fluke8(short_fmins, 0, short_long_t, format == 1));
 
         // build prefix table using plen
         this->pt = std::move(PrefTab(long_fmins, plen));
@@ -493,8 +505,13 @@ public:
             return;
         }
 
-        cerr << "Save the index to " << filename << endl;
+        cerr << "Save the index to " << filename << " (format " << format << ")" << endl;
 
+        if (format >= 2)
+        {
+            out.write(INDEX_SIGNATURE, sizeof(INDEX_SIGNATURE));
+            out.write(reinterpret_cast<const char *>(&format), sizeof(format));
+        }
         CCS.serialize(out);
 
         uint64_t color_set_ids_size = color_set_ids.size();
@@ -541,6 +558,29 @@ public:
             in.exceptions(std::ios::failbit | std::ios::badbit | std::ios::eofbit);
             cerr << "Loading index from " << filename << endl;
 
+            // The signature and format number, if there is one
+            char signature[sizeof(INDEX_SIGNATURE)] = {};
+            if (memory)
+            {
+                if (memory->remaining() >= sizeof(signature))
+                    std::memcpy(signature, memory->current(), sizeof(signature));
+            }
+            else
+            {
+                file.read(signature, sizeof(signature));
+                file.clear();
+                file.seekg(0);
+            }
+            format = 1;
+            if (std::memcmp(signature, INDEX_SIGNATURE, sizeof(signature)) == 0)
+            {
+                in.read(signature, sizeof(signature));
+                in.read(reinterpret_cast<char *>(&format), sizeof(format));
+                if (format < 2 || format > INDEX_FORMAT)
+                    throw std::runtime_error(filename + " is a Finimap index of format " + to_string(format) + ", which this version of Finimap cannot read (it reads formats 1 to " + to_string(INDEX_FORMAT) + ")");
+            }
+            cerr << "Index format: " << format << endl;
+
             CCS.load(in);
 
             uint64_t color_set_ids_size;
@@ -549,7 +589,7 @@ public:
 
             loaded_color_set_ids.load(in, color_set_ids_size);
 
-            f8.load(in);
+            f8.load(in, format);
             pt.load(in);
 
             // metadata

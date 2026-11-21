@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "Pred8v2.hh"
+#include "Pino.hh"
 #include "Util.hh"
 
 using namespace std;
@@ -68,7 +69,8 @@ class Fluke8 {
        _u = data[data.size()-1];
        _lowerlen = lowerlen;
        _upperlen = upperlen;
-       _pred8 = Pred8v2(data);
+       _pino = Pino(data);
+       _use_pino = true;
        data.clear();
 
        is.clear();
@@ -86,7 +88,9 @@ class Fluke8 {
     }
 
 
-    Fluke8(const vector<std::string_view> &finstrings, const uint64_t lowerlen, const uint64_t upperlen) {
+    // Builds the index of the short finimizers, which must be sorted. With old_layout, the
+    // predecessor structure is the Pred8v2 of index format 1 (used to test against it).
+    Fluke8(const vector<std::string_view> &finstrings, const uint64_t lowerlen, const uint64_t upperlen, const bool old_layout = false) {
        vector<uint64_t> data;
        vector<uint8_t> lengths;
        for(const string_view& s : finstrings){
@@ -104,15 +108,23 @@ class Fluke8 {
        _u = data[data.size()-1];
        _lowerlen = lowerlen;
        _upperlen = upperlen;
-       _pred8 = Pred8v2(data);
+       if(old_layout){
+          _pred8 = Pred8v2(data);
+          _use_pino = false;
+       }else{
+          _pino = Pino(data);
+          _use_pino = true;
+       }
        _lengths.resize(_n);
        for(uint64_t i=0;i<_n;i++){
           _lengths[i] = lengths[i];
        }
     }
 
+    // Looks up the short finimizer that is a prefix of key (2 bits a character, from the top
+    // bit), of at most len characters. Returns its rank and length, or {-1, 0}.
     pair<int64_t,uint64_t> finiLookup(uint64_t key, uint64_t len) const{
-       //cerr << "key: " << key << '\n';
+       if(_use_pino) return finiLookup_pino(key, len);
        uint64_t cle = key>>(((uint64_t)64) - ((uint64_t)2)*_upperlen);
        //cerr << "cle: " << cle << '\n';
        pair<uint64_t, uint64_t> p = _pred8.getPredPrefix(cle);
@@ -130,12 +142,38 @@ class Fluke8 {
        return {-1,0};
     }
 
+    // The same with the Pino structure. Short finimizers are prefix-free, so the only one that
+    // can be a prefix of key is its predecessor among the padded finimizers.
+    pair<int64_t,uint64_t> finiLookup_pino(uint64_t key, uint64_t len) const{
+       const uint64_t cle = key>>(((uint64_t)64) - ((uint64_t)2)*_upperlen);
+       uint64_t value;
+       bool known;
+       const int64_t idx = _pino.predecessor(cle, value, known);
+       if(idx < 0) return {-1,0};
+       const uint64_t flen = _lengths[idx];
+       if(flen > len) return {-1,0};
+       // The finimizer matches if its first flen characters are those of key. As it is padded
+       // with zeros, its value must then be the following.
+       const uint64_t shift = 2*(_upperlen - flen);
+       const uint64_t want = shift >= 64 ? 0 : (cle >> shift) << shift;
+       if(known){
+          if(value != want) return {-1,0};
+       }else{
+          // The finimizer lies in an earlier bucket than key: check that it is in the bucket
+          // of want, with the low byte of want
+          if((want & 255) != _pino.low(idx) || (want >> 8) >= (cle >> 8) || !_pino.in_bucket(idx, want >> 8)) return {-1,0};
+       }
+       return {idx, flen};
+    }
+
     pair<int64_t, bool> inline getPred(uint64_t key) const{
+       if(_use_pino) throw std::logic_error("Fluke8::getPred is not supported with the Pino layout");
        uint64_t cle = key>>(((uint64_t)64) - ((uint64_t)2)*_upperlen);
        return _pred8.getPred(cle);
     }
 
     int64_t rank(int64_t pos) const{
+       if(_use_pino) throw std::logic_error("Fluke8::rank is not supported with the Pino layout");
        return _pred8.rank(pos);
     } 
 
@@ -145,7 +183,7 @@ class Fluke8 {
     uint64_t sizeInBytes() const{ 
         uint64_t sz = 5*sizeof(uint64_t);
         sz += _n; //for lengths array
-        sz += _pred8.sizeInBytes();
+        sz += _use_pino ? _pino.sizeInBytes() : _pred8.sizeInBytes();
         return sz;
     }
 
@@ -158,13 +196,15 @@ class Fluke8 {
         os.write((char *)&_upperlen, sizeof(uint64_t));
         os.write((char *)&_lowerlen, sizeof(uint64_t));
         cerr << "_u _n _min _upperlen _lowerlen: "<<_u<<' '<<_n<<' '<<_min<<' '<<_upperlen<<' '<<_lowerlen<<'\n';
-        _pred8.serialize(os);
+        if(_use_pino) _pino.serialize(os);
+        else _pred8.serialize(os);
         os.write((char *)_lengths.data(), _n*sizeof(uint8_t));
-        written += 5*sizeof(uint64_t) + _pred8.sizeInBytes() + _n;
+        written += 5*sizeof(uint64_t) + (_use_pino ? _pino.sizeInBytes() : _pred8.sizeInBytes()) + _n;
         return written;
     }
 
-    void load(std::istream& is){
+    // format_version 1: Pred8v2; 2 and later: Pino
+    void load(std::istream& is, const uint64_t format_version){
        cerr << "Fluke8.load()...\n";
        is.read((char *)&_u, sizeof(uint64_t));
        is.read((char *)&_n, sizeof(uint64_t));
@@ -172,7 +212,13 @@ class Fluke8 {
        is.read((char *)&_upperlen, sizeof(uint64_t));
        is.read((char *)&_lowerlen, sizeof(uint64_t));
        cerr << "_u _n _min _upperlen _lowerlen: "<<_u<<' '<<_n<<' '<<_min<<' '<<_upperlen<<' '<<_lowerlen<<'\n';
-       _pred8.load(is);
+       _use_pino = format_version >= 2;
+       if(_use_pino){
+          _pino.load(is);
+          if(is && _pino.size() != _n) throw std::runtime_error("The index is inconsistent (number of short finimizers)");
+       }else{
+          _pred8.load(is);
+       }
        _lengths.load(is, _n);
     }
     
@@ -194,7 +240,9 @@ class Fluke8 {
        return _lowerlen;
     }
 
-    Pred8v2 _pred8;
+    Pred8v2 _pred8;  // index format 1
+    Pino _pino;      // index format 2
+    bool _use_pino = true;
    private:
     uint64_t _u = 0;  // universe size
     uint64_t _n = 0;  // number of elements

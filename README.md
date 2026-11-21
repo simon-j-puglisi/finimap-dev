@@ -142,9 +142,10 @@ cd ..
 | `-i, --index-file` | FILE | Required | Colored finimizer matrix (CFM) file from Stage 1 |
 | `-o, --out-file` | FILE | Required | Output index filename prefix (without extension) |
 | `-p, --p_len` | INT | 10 | Finimizer prefix length (bits used for bucketing). Higher values → more buckets → faster but larger index |
-| `-x` | INT | 16 | Short/long finimizer threshold, in characters. Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
+| `-x` | INT | 16 | Short/long finimizer threshold, in characters (1 to 19). Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
 | `-m, --meta` | BOOL | false | Set to `true` for metagenomic indexes (multiple reference genomes) |
+| `--index-format` | INT | 2 | Index format to write. 1 is the format of earlier versions of Finimap, kept for comparison; `search-fmin` reads both |
 | `-h, --help` | - | - | Display help message |
 
 #### Parameter Tuning
@@ -154,11 +155,22 @@ cd ..
   - Larger values: faster queries, larger index size
   
 - **`-x` (short/long threshold)**: Affects short/long finimizer representation, never the results
-  - The table for short finimizers takes 4^x / 64 bytes whatever the collection: 67 MB at 16,
-    1.07 GB at 18. Long finimizers take 8 bytes each instead of 2.
-  - On 3,498 *E. coli* genomes, `-x 16` gave a 1.94 GB index against 2.94 GB at `-x 18`, with
-    identical results and about the same query time; `-x 14` was slightly larger and slower than
-    `-x 16`. The paper used `-x 18`.
+  - The bucket table for short finimizers takes about 4^x / 228 bytes whatever the collection:
+    19 MB at 16, 302 MB at 18. Long finimizers take 8 bytes each instead of 2.
+  - On 3,498 *E. coli* genomes, `-x 16` gave a 1.94 GB index against 2.94 GB at `-x 18` in
+    index format 1, with identical results and about the same query time; `-x 14` was slightly
+    larger and slower than `-x 16`. The paper used `-x 18`.
+
+#### Index formats
+
+- **Format 2** (the default) stores the short finimizers in a Pino structure (*Faster
+  Small-Alphabet Subset Rank Queries*, Section 4.2): the byte of low bits of each finimizer,
+  and the start of each bucket of 256 values coded in about 9 bits instead of a 32-bit pointer.
+  The file starts with the signature `FINIMAP!` and the format number.
+- **Format 1** is the format of earlier versions, with a 32-bit pointer per bucket (4^x / 64
+  bytes). It has no signature. `build-fmin --index-format 1` still writes it, byte for byte as
+  before.
+- Both give the same results. `dev/index_sizes.py` reports the size of each part of either.
 
 #### Examples
 

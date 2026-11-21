@@ -18,6 +18,13 @@ def report(prefix):
             parts.append((name, nbytes, note))
             f.seek(nbytes, 1)
 
+        fmt = 1
+        if f.read(8) == b"FINIMAP!":
+            fmt = u64(f)
+            if fmt != 2:
+                sys.exit("%s: index format %d is not known to this script" % (path, fmt))
+        else:
+            f.seek(0)
         sparse_count, dense_count = u64(f), u64(f)
         bits = u64(f)
         skip("color sets: bitmaps (dense sets)", (bits + 63) // 64 * 8, "%d bits" % bits)
@@ -28,10 +35,19 @@ def report(prefix):
         n_ids = u64(f)
         skip("color set id of each finimizer", n_ids * 8, "%d finimizers" % n_ids)
         f8_u, f8_n, f8_min, upperlen, lowerlen = [u64(f) for _ in range(5)]
-        p_u, p_n, p_min, nblocks = [u64(f) for _ in range(4)]
-        skip("short finimizers: bucket table (size set by -x)", (nblocks + 1) * 4, "%d buckets" % nblocks)
-        u64(f)
-        skip("short finimizers: low bytes", p_n, "%d short finimizers (length <= %d)" % (p_n, upperlen))
+        if fmt == 1:
+            p_u, p_n, p_min, nblocks = [u64(f) for _ in range(4)]
+            skip("short finimizers: bucket table (size set by -x)", (nblocks + 1) * 4, "%d buckets" % nblocks)
+            u64(f)
+            skip("short finimizers: low bytes", p_n, "%d short finimizers (length <= %d)" % (p_n, upperlen))
+        else:
+            p_n, p_min, p_max, nblocks, nb2 = [u64(f) for _ in range(5)]
+            l2 = u64(f)
+            skip("short finimizers: bucket table, Pino blocks (size set by -x)", l2, "%d buckets" % nblocks)
+            h2 = u64(f)
+            skip("short finimizers: bucket table, Pino counts", h2 * 4)
+            l = u64(f)
+            skip("short finimizers: low bytes", l, "%d short finimizers (length <= %d)" % (p_n, upperlen))
         skip("short finimizers: lengths", f8_n)
         preflen, nprefs, nfins = u64(f), u64(f), u64(f)
         skip("long finimizers: prefix table (size set by -p)", (nprefs + 1) * 4, "%d prefixes of length %d" % (nprefs, preflen))
@@ -40,8 +56,8 @@ def report(prefix):
         end = f.tell()
     accounted = sum(p[1] for p in parts)
     n_bitmaps = bits // n_colors if n_colors else 0
-    print("%s: %.3f GB, %d colors, %d finimizers, k = %d | distinct color sets: %d listed (sparse), %d listed as complements (very dense), %d as bitmaps"
-          % (path, total / 1e9, n_colors, n_finimizers, k, sparse_count, dense_count - sparse_count, n_bitmaps))
+    print("%s: %.3f GB, format %d, %d colors, %d finimizers, k = %d | distinct color sets: %d listed (sparse), %d listed as complements (very dense), %d as bitmaps"
+          % (path, total / 1e9, fmt, n_colors, n_finimizers, k, sparse_count, dense_count - sparse_count, n_bitmaps))
     for name, nbytes, note in parts:
         print("  %8.1f MB  %5.1f%%  %s%s" % (nbytes / 1e6, 100.0 * nbytes / total, name, ("  (" + note + ")") if note else ""))
     print("  %8.1f MB  %5.1f%%  headers" % ((total - accounted) / 1e6, 100.0 * (total - accounted) / total))
