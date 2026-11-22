@@ -18,8 +18,9 @@
 // Build (from the repository root):
 //   g++ -std=c++2a -O3 -march=native -fopenmp -I include -I SDSL/include -o dev/colorsets/cs_analyze \
 //       dev/colorsets/cs_analyze.cpp src/utilities.cpp src/seqio.cpp -L SDSL/lib -lsdsl -lz
-// Run: cs_analyze INDEX_PREFIX [--threads N] [--dump FILE] [--quick]
+// Run: cs_analyze INDEX_PREFIX [--threads N] [--dump FILE] [--quick] [--no-ref]
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -454,17 +455,17 @@ static RefResult reference_coding(const Sets &s, uint64_t bands, uint64_t rows, 
 
 // ---- meta-colors ---------------------------------------------------------------------------
 
-// An order of the colors in which colors that occur in similar sets are close: a greedy
-// nearest-neighbor chain over the colors, compared on a sample of the sets.
-static vector<uint32_t> color_order(const Sets &s, uint64_t sample_sets)
+// For each color, which of a sample of the sets contain it: the colors are compared on these
+// columns. Returns C columns of SW words.
+static vector<uint64_t> color_columns(const Sets &s, uint64_t sample_sets, uint64_t &SW)
 {
     const uint64_t C = s.C, n = s.n;
     std::mt19937_64 rng(7);
     vector<uint64_t> pick;
     for (uint64_t i = 0; i < std::min(n, sample_sets); i++)
         pick.push_back(n <= sample_sets ? i : rng() % n);
-    const uint64_t SW = (pick.size() + 63) / 64;
-    vector<uint64_t> col(C * SW, 0); // column c: which sampled sets contain color c
+    SW = (pick.size() + 63) / 64;
+    vector<uint64_t> col(C * SW, 0);
     for (uint64_t j = 0; j < pick.size(); j++)
     {
         const uint64_t *r = s.row(pick[j]);
@@ -475,6 +476,13 @@ static vector<uint32_t> color_order(const Sets &s, uint64_t sample_sets)
                 col[c * SW + j / 64] |= uint64_t(1) << (j % 64);
             }
     }
+    return col;
+}
+
+// A greedy nearest-neighbor chain over the colors
+static vector<uint32_t> chain_order(const Sets &s, const vector<uint64_t> &col, uint64_t SW)
+{
+    const uint64_t C = s.C;
     vector<uint32_t> order;
     vector<uint8_t> used(C, 0);
     uint64_t cur = 0;
@@ -512,27 +520,201 @@ static vector<uint32_t> color_order(const Sets &s, uint64_t sample_sets)
     return order;
 }
 
-struct MetaResult
+// Average-linkage hierarchical clustering of the colors (nearest-neighbor chain algorithm).
+// Returns the leaf order of the tree, and in tree[v] = {left, right, size} for the internal
+// nodes C..2C-2 (leaves are 0..C-1).
+struct Tree
 {
-    uint64_t block = 0, n_blocks = 0, distinct = 0;
-    double partial_bits = 0, ref_bits = 0;
+    vector<uint32_t> order;
+    vector<std::array<uint32_t, 3>> node; // index v - C
 };
 
-// Sizes with the colors, in the given order, split into blocks of `block` colors
-static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, uint64_t block)
+static Tree hierarchical_order(const Sets &s, const vector<uint64_t> &col, uint64_t SW)
+{
+    const uint64_t C = s.C;
+    vector<float> D(C * C);
+#pragma omp parallel for schedule(dynamic, 16)
+    for (uint64_t a = 0; a < C; a++)
+    {
+        D[a * C + a] = 0;
+        for (uint64_t b = a + 1; b < C; b++)
+        {
+            const float d = (float)hamming(&col[a * SW], &col[b * SW], SW);
+            D[a * C + b] = d;
+            D[b * C + a] = d;
+        }
+    }
+    vector<uint8_t> active(C, 1);
+    vector<uint32_t> size(C, 1), id(C); // id: the tree node now held in each slot
+    std::iota(id.begin(), id.end(), 0);
+    Tree t;
+    vector<uint64_t> chain;
+    uint64_t n_active = C;
+    while (n_active > 1)
+    {
+        if (chain.empty())
+            for (uint64_t a = 0; a < C; a++)
+                if (active[a])
+                {
+                    chain.push_back(a);
+                    break;
+                }
+        const uint64_t a = chain.back();
+        const uint64_t prev = chain.size() >= 2 ? chain[chain.size() - 2] : UINT64_MAX;
+        // nearest active neighbor of a, preferring the previous element of the chain on ties
+        float bd = INFINITY;
+        uint64_t bb = UINT64_MAX;
+        for (uint64_t b = 0; b < C; b++)
+        {
+            if (!active[b] || b == a)
+                continue;
+            const float d = D[a * C + b];
+            if (d < bd || (d == bd && b == prev))
+            {
+                bd = d;
+                bb = b;
+            }
+        }
+        if (bb == prev)
+        {
+            // a and prev are reciprocal nearest neighbors: merge them into slot min(a, prev)
+            chain.pop_back();
+            chain.pop_back();
+            const uint64_t x = std::min(a, prev), y = std::max(a, prev);
+            const float nx = (float)size[x], ny = (float)size[y];
+            for (uint64_t k = 0; k < C; k++)
+            {
+                if (!active[k] || k == x || k == y)
+                    continue;
+                const float d = (nx * D[x * C + k] + ny * D[y * C + k]) / (nx + ny);
+                D[x * C + k] = d;
+                D[k * C + x] = d;
+            }
+            t.node.push_back({id[x], id[y], size[x] + size[y]});
+            id[x] = (uint32_t)(C + t.node.size() - 1);
+            size[x] += size[y];
+            active[y] = 0;
+            n_active--;
+        }
+        else
+            chain.push_back(bb);
+    }
+    // Leaf order: depth-first, left before right
+    vector<uint32_t> stack = {(uint32_t)(C + t.node.size() - 1)};
+    if (C == 1)
+        stack = {0};
+    while (!stack.empty())
+    {
+        const uint32_t v = stack.back();
+        stack.pop_back();
+        if (v < C)
+            t.order.push_back(v);
+        else
+        {
+            stack.push_back(t.node[v - C][1]);
+            stack.push_back(t.node[v - C][0]);
+        }
+    }
+    return t;
+}
+
+// Blocks that follow the tree: the largest subtrees with at most max_block leaves, then
+// neighbors merged while they fit in max_block together. Returns block sizes, in leaf order.
+static vector<uint64_t> tree_blocks(const Tree &t, uint64_t C, uint64_t max_block)
+{
+    vector<uint64_t> sizes;
+    vector<uint32_t> stack = {(uint32_t)(C + t.node.size() - 1)};
+    if (C == 1)
+        stack = {0};
+    while (!stack.empty())
+    {
+        const uint32_t v = stack.back();
+        stack.pop_back();
+        const uint64_t sz = v < C ? 1 : t.node[v - C][2];
+        if (sz <= max_block)
+            sizes.push_back(sz);
+        else
+        {
+            stack.push_back(t.node[v - C][1]);
+            stack.push_back(t.node[v - C][0]);
+        }
+    }
+    vector<uint64_t> merged;
+    for (uint64_t sz : sizes)
+    {
+        if (!merged.empty() && merged.back() + sz <= max_block)
+            merged.back() += sz;
+        else
+            merged.push_back(sz);
+    }
+    return merged;
+}
+
+static vector<uint64_t> fixed_blocks(uint64_t C, uint64_t block)
+{
+    vector<uint64_t> sizes;
+    for (uint64_t p = 0; p < C; p += block)
+        sizes.push_back(std::min(block, C - p));
+    return sizes;
+}
+
+// Total length of Huffman codes for symbols with the given counts
+static double huffman_bits(vector<uint64_t> counts)
+{
+    if (counts.size() <= 1)
+        return counts.empty() ? 0 : (double)counts[0]; // one symbol: 1 bit each, to be safe
+    std::sort(counts.begin(), counts.end());
+    // two-queue method: the cost is the sum of the merged weights
+    std::vector<uint64_t> merged;
+    merged.reserve(counts.size());
+    size_t i = 0, j = 0;
+    double cost = 0;
+    auto take = [&]() -> uint64_t
+    {
+        if (j < merged.size() && (i >= counts.size() || merged[j] < counts[i]))
+            return merged[j++];
+        return counts[i++];
+    };
+    for (size_t k = 0; k + 1 < counts.size(); k++)
+    {
+        const uint64_t a = take(), b = take();
+        merged.push_back(a + b);
+        cost += (double)(a + b);
+    }
+    return cost;
+}
+
+struct MetaResult
+{
+    uint64_t n_blocks = 0, distinct = 0, min_block = 0, max_block = 0;
+    double partial_bits = 0;
+    double ids_fixed = 0;   // fixed-width ids per block, or the list of nonempty blocks
+    double ids_h0 = 0;      // empirical entropy of each block's ids, plus offsets
+    double ids_huffman = 0; // Huffman codes per block, plus offsets
+};
+
+// Sizes with the colors, in the given order, split into blocks of the given sizes
+static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, const vector<uint64_t> &block_sizes)
 {
     const uint64_t C = s.C, n = s.n;
-    const uint64_t n_blocks = (C + block - 1) / block;
-    const uint64_t BW = (block + 63) / 64; // words of a partial set
-    vector<uint32_t> pos(C);
+    const uint64_t n_blocks = block_sizes.size();
+    vector<uint64_t> bstart(n_blocks + 1, 0), wstart(n_blocks + 1, 0);
+    for (uint64_t b = 0; b < n_blocks; b++)
+    {
+        bstart[b + 1] = bstart[b] + block_sizes[b];
+        wstart[b + 1] = wstart[b] + (block_sizes[b] + 63) / 64;
+    }
+    vector<uint32_t> pos(C), block_of(C);
     for (uint64_t p = 0; p < C; p++)
         pos[order[p]] = (uint32_t)p;
-    // Each set's partial sets, hashed, block by block
+    for (uint64_t b = 0; b < n_blocks; b++)
+        for (uint64_t p = bstart[b]; p < bstart[b + 1]; p++)
+            block_of[p] = (uint32_t)b;
     vector<uint64_t> hashes(n * n_blocks);
     vector<uint16_t> psize(n * n_blocks);
 #pragma omp parallel
     {
-        vector<uint64_t> tmp(n_blocks * BW);
+        vector<uint64_t> tmp(wstart[n_blocks]);
 #pragma omp for schedule(dynamic, 4096)
         for (uint64_t i = 0; i < n; i++)
         {
@@ -542,16 +724,16 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, uint
                 for (uint64_t word = r[w]; word; word &= word - 1)
                 {
                     const uint64_t p = pos[w * 64 + __builtin_ctzll(word)];
-                    const uint64_t b = p / block, off = p % block;
-                    tmp[b * BW + off / 64] |= uint64_t(1) << (off % 64);
+                    const uint64_t b = block_of[p], off = p - bstart[b];
+                    tmp[wstart[b] + off / 64] |= uint64_t(1) << (off % 64);
                 }
             for (uint64_t b = 0; b < n_blocks; b++)
             {
                 uint64_t h = hmix(b + 1), m = 0;
-                for (uint64_t w = 0; w < BW; w++)
+                for (uint64_t w = wstart[b]; w < wstart[b + 1]; w++)
                 {
-                    h = hmix(h ^ tmp[b * BW + w]);
-                    m += __builtin_popcountll(tmp[b * BW + w]);
+                    h = hmix(h ^ tmp[w]);
+                    m += __builtin_popcountll(tmp[w]);
                 }
                 hashes[i * n_blocks + b] = h;
                 psize[i * n_blocks + b] = (uint16_t)m;
@@ -559,27 +741,43 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, uint
         }
     }
     MetaResult res;
-    res.block = block;
     res.n_blocks = n_blocks;
+    res.min_block = *std::min_element(block_sizes.begin(), block_sizes.end());
+    res.max_block = *std::max_element(block_sizes.begin(), block_sizes.end());
     vector<uint64_t> distinct(n_blocks);
-    double partial_bits = 0;
-#pragma omp parallel for schedule(dynamic, 1) reduction(+ : partial_bits)
+    double partial_bits = 0, h0 = 0, huff = 0;
+#pragma omp parallel for schedule(dynamic, 1) reduction(+ : partial_bits, h0, huff)
     for (uint64_t b = 0; b < n_blocks; b++)
     {
-        const uint64_t bsize = std::min(block, C - b * block);
-        std::unordered_map<uint64_t, uint16_t> seen;
+        struct Info
+        {
+            uint64_t count;
+            uint16_t size;
+        };
+        std::unordered_map<uint64_t, Info> seen;
         seen.reserve(1024);
         for (uint64_t i = 0; i < n; i++)
-            seen.emplace(hashes[i * n_blocks + b], psize[i * n_blocks + b]);
+        {
+            auto [it, fresh] = seen.try_emplace(hashes[i * n_blocks + b], Info{0, psize[i * n_blocks + b]});
+            it->second.count++;
+        }
         distinct[b] = seen.size();
-        for (auto &[h, m] : seen)
-            partial_bits += set_bits(m, bsize);
+        vector<uint64_t> counts;
+        counts.reserve(seen.size());
+        for (auto &[h, info] : seen)
+        {
+            partial_bits += set_bits(info.size, block_sizes[b]);
+            counts.push_back(info.count);
+            const double p = (double)info.count / (double)n;
+            h0 += -(double)info.count * std::log2(p);
+        }
+        huff += huffman_bits(counts);
     }
     res.partial_bits = partial_bits;
     for (uint64_t b = 0; b < n_blocks; b++)
         res.distinct += distinct[b];
-    // Each set: the id of its partial set in every block, or the list of its nonempty blocks
-    // with their ids, whichever is smaller
+    // Fixed-width ids: the id of its partial set in every block, or the list of its nonempty
+    // blocks with their ids, whichever is smaller, and one bit to tell which
     vector<double> idw(n_blocks);
     double fixed = 0;
     for (uint64_t b = 0; b < n_blocks; b++)
@@ -588,17 +786,22 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, uint
         fixed += idw[b];
     }
     const double block_id = (double)bits_for(n_blocks);
-    double ref_bits = 0;
-#pragma omp parallel for schedule(static) reduction(+ : ref_bits)
+    double ids_fixed = 0;
+#pragma omp parallel for schedule(static) reduction(+ : ids_fixed)
     for (uint64_t i = 0; i < n; i++)
     {
         double listed = 0;
         for (uint64_t b = 0; b < n_blocks; b++)
             if (psize[i * n_blocks + b] != 0)
                 listed += block_id + idw[b];
-        ref_bits += std::min(fixed, listed) + 1; // one bit to tell which
+        ids_fixed += std::min(fixed, listed) + 1;
     }
-    res.ref_bits = ref_bits;
+    res.ids_fixed = ids_fixed;
+    // Variable-length ids need the start of each set's codes: Elias-Fano over the starts
+    auto with_offsets = [&](double bits)
+    { return bits + (double)n * (2.0 + std::max(0.0, std::floor(std::log2(bits / (double)n)))); };
+    res.ids_h0 = with_offsets(h0);
+    res.ids_huffman = with_offsets(huff);
     return res;
 }
 
@@ -608,12 +811,12 @@ int main(int argc, char **argv)
 {
     if (argc < 2)
     {
-        std::cerr << "Usage: cs_analyze INDEX_PREFIX [--threads N] [--dump FILE] [--quick]" << std::endl;
+        std::cerr << "Usage: cs_analyze INDEX_PREFIX [--threads N] [--dump FILE] [--quick] [--no-ref]" << std::endl;
         return 1;
     }
     std::string prefix = argv[1], dump;
     int threads = omp_get_max_threads();
-    bool quick = false;
+    bool quick = false, no_ref = false;
     for (int a = 2; a < argc; a++)
     {
         std::string arg = argv[a];
@@ -623,6 +826,8 @@ int main(int argc, char **argv)
             dump = argv[++a];
         else if (arg == "--quick")
             quick = true;
+        else if (arg == "--no-ref")
+            no_ref = true;
         else
         {
             std::cerr << "Unknown argument " << arg << std::endl;
@@ -734,6 +939,8 @@ int main(int argc, char **argv)
         uint64_t bands, rows, cand;
     };
     vector<Setting> settings = quick ? vector<Setting>{{8, 8, 64}} : vector<Setting>{{8, 8, 64}, {16, 6, 256}};
+    if (no_ref)
+        settings.clear();
     for (const Setting &st : settings)
     {
         for (bool majority : {false, true})
@@ -753,17 +960,34 @@ int main(int argc, char **argv)
         double t = now();
         vector<uint32_t> identity(C);
         std::iota(identity.begin(), identity.end(), 0);
-        const vector<uint32_t> ordered = color_order(s, 32768);
-        printf("CS_ORDER colors ordered by similarity in %.0f s\n", now() - t);
-        vector<uint64_t> blocks = quick ? vector<uint64_t>{128} : vector<uint64_t>{64, 128, 256, 512};
-        for (int o = 0; o < 2; o++)
-            for (uint64_t b : blocks)
+        uint64_t SW = 0;
+        const vector<uint64_t> col = color_columns(s, 65536, SW);
+        const vector<uint32_t> chain = chain_order(s, col, SW);
+        printf("CS_ORDER chain of nearest colors in %.0f s\n", now() - t);
+        t = now();
+        const Tree tree = hierarchical_order(s, col, SW);
+        printf("CS_ORDER average-linkage tree in %.0f s\n", now() - t);
+        fflush(stdout);
+        const vector<uint64_t> sizes = quick ? vector<uint64_t>{256} : vector<uint64_t>{128, 256, 512, 1024};
+        struct Variant
+        {
+            const char *order_name;
+            const vector<uint32_t> *order;
+            bool tree_cut;
+        };
+        const vector<Variant> variants = {{"input", &identity, false}, {"chain", &chain, false}, {"tree", &tree.order, false}, {"tree", &tree.order, true}};
+        for (const Variant &v : variants)
+            for (uint64_t b : sizes)
             {
                 t = now();
-                const MetaResult m = meta_colors(s, o ? ordered : identity, b);
-                printf("CS_META order=%s block=%lu: %s (%lu blocks, %lu distinct partial sets: %s; partial set ids of each set %s); %.0f s\n",
-                       o ? "similarity" : "input", b, mb(m.partial_bits + m.ref_bits).c_str(), m.n_blocks, m.distinct, mb(m.partial_bits).c_str(),
-                       mb(m.ref_bits).c_str(), now() - t);
+                const vector<uint64_t> blocks = v.tree_cut ? tree_blocks(tree, C, b) : fixed_blocks(C, b);
+                const MetaResult m = meta_colors(s, *v.order, blocks);
+                const double best_ids = std::min({m.ids_fixed, m.ids_h0, m.ids_huffman});
+                printf("CS_META order=%s blocks=%s%lu: %s with Huffman ids, %s with fixed-width ids (%lu blocks of %lu-%lu colors; %lu distinct partial sets: %s; ids of each set: fixed %s, Huffman %s, entropy %s); %.0f s\n",
+                       v.order_name, v.tree_cut ? "subtrees<=" : "", b, mb(m.partial_bits + m.ids_huffman).c_str(), mb(m.partial_bits + m.ids_fixed).c_str(),
+                       m.n_blocks, m.min_block, m.max_block, m.distinct, mb(m.partial_bits).c_str(), mb(m.ids_fixed).c_str(), mb(m.ids_huffman).c_str(),
+                       mb(m.ids_h0).c_str(), now() - t);
+                (void)best_ids;
                 fflush(stdout);
             }
     }

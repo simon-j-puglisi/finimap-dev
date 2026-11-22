@@ -8,6 +8,7 @@
 #   FM_INDEXES   index prefixes to analyse, separated by spaces (required; any index format)
 #   FM_OUT       output directory (default: the current directory)
 #   FM_COMPRESS  1 to also compress each index's sets with zstd or xz (default 1)
+#   FM_CS_ARGS   more options for cs_analyze, such as --no-ref (default none)
 set -euo pipefail
 export LC_ALL=C
 
@@ -15,11 +16,12 @@ REPO=${FM_REPO:?set FM_REPO}
 OUT=$(readlink -f "${FM_OUT:-$PWD}")
 INDEXES=${FM_INDEXES:?set FM_INDEXES}
 COMPRESS=${FM_COMPRESS:-1}
+CS_ARGS=${FM_CS_ARGS:-}
 JOBS=${SLURM_CPUS_PER_TASK:-4}
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
 . "$REPO/dev/build_finimap.sh"
 
-echo "FM_CS_CHECK start host=$(hostname) date=$(date '+%F %T') commit=$COMMIT threads=$JOBS"
+echo "FM_CS_CHECK start host=$(hostname) date=$(date '+%F %T') commit=$COMMIT threads=$JOBS args='$CS_ARGS' compress=$COMPRESS"
 mkdir -p "$OUT"
 fm_load_modules
 
@@ -53,7 +55,7 @@ for IDX in $INDEXES; do
     fi
     DUMP_ARGS=()
     [ -n "$COMPRESSOR" ] && DUMP_ARGS=(--dump "$OUT/$NAME.sets.bin")
-    python3 "$REPO/dev/timeit.py" "$OUT/$NAME.time" "$OUT/cs_analyze" "$IDX" --threads "$JOBS" ${DUMP_ARGS[@]+"${DUMP_ARGS[@]}"} \
+    python3 "$REPO/dev/timeit.py" "$OUT/$NAME.time" "$OUT/cs_analyze" "$IDX" --threads "$JOBS" ${DUMP_ARGS[@]+"${DUMP_ARGS[@]}"} $CS_ARGS \
         > "$OUT/$NAME.out" 2> "$OUT/$NAME.err" \
         || { echo "FM_ERROR cs_analyze failed on $IDX:"; tail -n 20 "$OUT/$NAME.err"; continue; }
     cat "$OUT/$NAME.out"
