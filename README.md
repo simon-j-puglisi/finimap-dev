@@ -33,16 +33,18 @@ Let $G$ be the de Bruijn graph of a set of $k$-mers $R$, $t \geq 1$ be an intege
 
 First clone the repository and access it with:
 ```bash
-git clone --recursive https://github.com/ElenaBiagi/Pseudoalignment-Finimizers.git
-cd Pseudoalignment-Finimizers
+git clone --recursive -b robust-query https://github.com/simon-j-puglisi/finimap-dev.git
+cd finimap-dev
 ```
+
+This is the development version of [ElenaBiagi/Finimap](https://github.com/ElenaBiagi/Finimap), on the branch `robust-query`.
 
 If you forgot the flag `--recursive`, pull the submodules with:
 ```bash
 git submodule update --init --recursive
 ```
 
-Build the [finimizer_matrix](https://github.com/jnalanko/finimizer_matrix/tree/2d0127710d8eb6093b43c097de83aaa809da2f6c) submodule:
+Build the [finimizer_matrix](https://github.com/simon-j-puglisi/finimizer_matrix/tree/low-memory-build) submodule (a low-memory version of [jnalanko/finimizer_matrix](https://github.com/jnalanko/finimizer_matrix); see its README):
 ```bash
 cd finimizer_matrix
 cargo build -r
@@ -97,14 +99,16 @@ cd finimizer_matrix
 
 #### Parameters
 
-- `-i, --input <FILE>`: Path to list file containing reference sequence paths (one per line, FASTA format)
+- `-i, --input <FILE>`: Path to list file containing reference sequence paths (one per line, FASTA or FASTQ). Each file is one color
 - `-o, --output <FILE>`: Output colored finimizer matrix file
-- `-k <K>`: K-mer length (default: 31). Recommended values: 19-31
-- `-t <THREADS>`: Number of threads (default: 1)
-- `-d, --temp-dir <DIR>`: Temporary directory for intermediate files
-- `-m <MEMORY>`: Maximum memory usage in MB
-- `--reverse`: Include reverse complement of sequences 
-- `--sparse`: Use sparse representation for finimizers (saves memory/space)
+- `-k <K>`: K-mer length (required; at most 31). Recommended values: 19-31
+- `-t, --n-threads <THREADS>`: Number of threads (default: 4)
+- `-d, --temp-dir <DIR>`: Temporary directory for intermediate files (required)
+- `-m, --mem-gb <GB>`: Memory budget for building the SBWT, in GB (default: 4). Peak memory also includes the SBWT itself and the color data, so it can be well above this figure
+- `--reverse`: Include reverse complement of sequences (normal for Finimap)
+- `--sparse`: Store color sets as lists of integers. The default (dense) build is the one used and tested with `build-fmin`
+
+On 3,498 *E. coli* genomes (k = 31, `-t 32 -m 64`), stage 1 takes about 12 minutes and 67 GB of memory.
 
 #### Example
 
@@ -116,6 +120,7 @@ cd finimizer_matrix
   -o ../example_data/coli.cfm \
   -k 31 \
   -t 4 \
+  -m 8 \
   -d ./temp \
   --reverse \
   2> /tmp/build.log
