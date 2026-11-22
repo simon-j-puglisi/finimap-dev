@@ -21,16 +21,34 @@ def report(prefix):
         fmt = 1
         if f.read(8) == b"FINIMAP!":
             fmt = u64(f)
-            if fmt not in (2, 3):
+            if fmt not in (2, 3, 4):
                 sys.exit("%s: index format %d is not known to this script" % (path, fmt))
         else:
             f.seek(0)
-        sparse_count, dense_count = u64(f), u64(f)
-        bits = u64(f)
-        skip("color sets: bitmaps (dense sets)", (bits + 63) // 64 * 8, "%d bits" % bits)
-        ef_n, ef_period = u64(f), u64(f)
-        skip("color sets: list offsets", (ef_n // ef_period + 1) * 8 + ef_n * 2, "%d lists" % ef_n)
-        if fmt >= 3:
+        sparse_count = dense_count = bits = 0
+        meta = None
+        if fmt >= 4:
+            mc_colors, mc_sets, mc_blocks, mc_row_bits, mc_partials = [u64(f) for _ in range(5)]
+            skip("color sets: meta-color layout (color order, blocks)", mc_colors * 2 + (3 * mc_blocks + 2) * 8)
+            po_n, po_bits, po_bytes = u64(f), u64(f), u64(f)
+            skip("color sets: partial set offsets", po_bytes, "%d bits each" % po_bits)
+            pk_n, pk_bits, pk_bytes = u64(f), u64(f), u64(f)
+            skip("color sets: partial set kinds", pk_bytes)
+            pd = u64(f)
+            skip("color sets: partial sets", pd, "%d distinct partial sets in %d blocks" % (mc_partials, mc_blocks))
+            rows = u64(f)
+            skip("color sets: partial set ids of each color set", rows, "%d color sets, %d bits each" % (mc_sets, mc_row_bits))
+            meta = (mc_sets, mc_blocks, mc_partials)
+        else:
+            sparse_count, dense_count = u64(f), u64(f)
+            bits = u64(f)
+            skip("color sets: bitmaps (dense sets)", (bits + 63) // 64 * 8, "%d bits" % bits)
+            ef_n, ef_period = u64(f), u64(f)
+            skip("color sets: list offsets", (ef_n // ef_period + 1) * 8 + ef_n * 2, "%d lists" % ef_n)
+        if fmt >= 4:
+            n_ids, id_bits, id_bytes = u64(f), u64(f), u64(f)
+            skip("color set id of each finimizer", id_bytes, "%d finimizers, %d bits each" % (n_ids, id_bits))
+        elif fmt >= 3:
             l_size, l_bits, l_bytes = u64(f), u64(f), u64(f)
             skip("color sets: lists (sparse sets, complements of very dense ones)", l_bytes, "%d colors listed, %d bits each" % (l_size, l_bits))
             n_ids, id_bits, id_bytes = u64(f), u64(f), u64(f)
@@ -66,8 +84,12 @@ def report(prefix):
         end = f.tell()
     accounted = sum(p[1] for p in parts)
     n_bitmaps = bits // n_colors if n_colors else 0
-    print("%s: %.3f GB, format %d, %d colors, %d finimizers, k = %d | distinct color sets: %d listed (sparse), %d listed as complements (very dense), %d as bitmaps"
-          % (path, total / 1e9, fmt, n_colors, n_finimizers, k, sparse_count, dense_count - sparse_count, n_bitmaps))
+    if meta:
+        print("%s: %.3f GB, format %d, %d colors, %d finimizers, k = %d | distinct color sets: %d, as meta-color sets in %d blocks"
+              % (path, total / 1e9, fmt, n_colors, n_finimizers, k, meta[0], meta[1]))
+    else:
+        print("%s: %.3f GB, format %d, %d colors, %d finimizers, k = %d | distinct color sets: %d listed (sparse), %d listed as complements (very dense), %d as bitmaps"
+              % (path, total / 1e9, fmt, n_colors, n_finimizers, k, sparse_count, dense_count - sparse_count, n_bitmaps))
     for name, nbytes, note in parts:
         print("  %8.1f MB  %5.1f%%  %s%s" % (nbytes / 1e6, 100.0 * nbytes / total, name, ("  (" + note + ")") if note else ""))
     print("  %8.1f MB  %5.1f%%  headers" % ((total - accounted) / 1e6, 100.0 * (total - accounted) / total))

@@ -13,6 +13,7 @@
 
 #include "Fluke8.hh"
 #include "packed_ints.hh"
+#include "MetaColorSets.hh"
 #include "PrefTab.hh"
 #include "mapped_array.hh"
 
@@ -51,8 +52,10 @@ constexpr uint64_t MAX_K = 31;
 // smaller than the signature read as a number.
 constexpr char INDEX_SIGNATURE[8] = {'F', 'I', 'N', 'I', 'M', 'A', 'P', '!'};
 // 1: short finimizers in Pred8v2; 2: in Pino; 3: also the color set ids, the lists of colors and
-// the lengths of the short finimizers packed in as many bits as they need
-constexpr uint64_t INDEX_FORMAT = 3;
+// the lengths of the short finimizers packed in as many bits as they need; 4: also the color
+// sets stored as meta-color sets (MetaColorSets.hh)
+constexpr uint64_t INDEX_FORMAT = 3;     // the format written by default
+constexpr uint64_t MAX_INDEX_FORMAT = 4; // the newest format, which can be written and read
 
 // Colored finimizers without much compression
 class ColoredFinimizers
@@ -188,7 +191,8 @@ class CompressedColoredFinimizers
 {
 
 public:
-    CompressedColorSets CCS; // L, EF, BV
+    CompressedColorSets CCS; // L, EF, BV (index formats 1 to 3)
+    MetaColorSets MCS;       // index format 4
 
     uint64_t n_colors;
     uint64_t n_finimizers;
@@ -211,7 +215,7 @@ public:
 
     CompressedColoredFinimizers(ColoredFinimizers &&cf, int64_t prefix_len, int64_t short_long_t, uint64_t kmer_size, bool meta, uint64_t format = INDEX_FORMAT)
     {
-        if (format < 1 || format > INDEX_FORMAT)
+        if (format < 1 || format > MAX_INDEX_FORMAT)
             throw std::runtime_error("Unknown index format " + to_string(format));
         this->format = format;
         cerr << "Let's compress it!" << endl;
@@ -261,8 +265,22 @@ public:
                 deduplicated_cs_sparse.emplace_back(color_set, std::move(finimizer_indices));
 
             }
-            CompressedColorSets CCS(deduplicated_cs_sparse, n_colors, this->color_set_ids);
-            this->CCS = std::move(CCS);
+            if (format >= 4)
+            {
+                // Meta-color sets, from the sets as bitmaps
+                const uint64_t W = (n_colors + 63) / 64;
+                vector<uint64_t> words(deduplicated_cs_sparse.size() * W, 0);
+                for (size_t i = 0; i < deduplicated_cs_sparse.size(); i++)
+                    for (size_t c : deduplicated_cs_sparse[i].first)
+                        words[i * W + c / 64] |= uint64_t(1) << (c % 64);
+                MCS.build(deduplicated_cs_sparse.size(), n_colors, [&](uint64_t i)
+                          { return (const uint64_t *)words.data() + i * W; });
+            }
+            else
+            {
+                CompressedColorSets CCS(deduplicated_cs_sparse, n_colors, this->color_set_ids);
+                this->CCS = std::move(CCS);
+            }
         } else {
             true_or_crash(cf.color_sets_concat.size() % n_finimizers == 0, "ERROR: color set bitmap length not divisible by finimizer count");
             n_colors = cf.color_sets_concat.size() / n_finimizers;
@@ -276,8 +294,20 @@ public:
             cerr << "Unique color sets: " << deduplicated_cs.size() << endl;
 
             this->color_set_ids.resize(n_finimizers);
-            CompressedColorSets CCS(deduplicated_cs, n_colors, this->color_set_ids);
-            this->CCS = std::move(CCS);
+            if (format >= 4)
+            {
+                // Meta-color sets: color set id i is deduplicated set i
+                for (size_t i = 0; i < deduplicated_cs.size(); i++)
+                    for (size_t fm : deduplicated_cs[i].second)
+                        this->color_set_ids[fm] = i;
+                MCS.build(deduplicated_cs.size(), n_colors, [&](uint64_t i)
+                          { return (const uint64_t *)deduplicated_cs[i].first.data(); });
+            }
+            else
+            {
+                CompressedColorSets CCS(deduplicated_cs, n_colors, this->color_set_ids);
+                this->CCS = std::move(CCS);
+            }
         }
 
         // this->color_set_ids is in the right order for finimizers
@@ -514,7 +544,10 @@ public:
             out.write(INDEX_SIGNATURE, sizeof(INDEX_SIGNATURE));
             out.write(reinterpret_cast<const char *>(&format), sizeof(format));
         }
-        CCS.serialize(out, format);
+        if (format >= 4)
+            MCS.serialize(out);
+        else
+            CCS.serialize(out, format);
 
         if (format >= 3)
         {
@@ -591,12 +624,15 @@ public:
             {
                 in.read(signature, sizeof(signature));
                 in.read(reinterpret_cast<char *>(&format), sizeof(format));
-                if (format < 2 || format > INDEX_FORMAT)
-                    throw std::runtime_error(filename + " is a Finimap index of format " + to_string(format) + ", which this version of Finimap cannot read (it reads formats 1 to " + to_string(INDEX_FORMAT) + ")");
+                if (format < 2 || format > MAX_INDEX_FORMAT)
+                    throw std::runtime_error(filename + " is a Finimap index of format " + to_string(format) + ", which this version of Finimap cannot read (it reads formats 1 to " + to_string(MAX_INDEX_FORMAT) + ")");
             }
             cerr << "Index format: " << format << endl;
 
-            CCS.load(in, format);
+            if (format >= 4)
+                MCS.load(in);
+            else
+                CCS.load(in, format);
 
             if (format >= 3)
             {

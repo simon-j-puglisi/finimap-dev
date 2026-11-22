@@ -150,7 +150,7 @@ cd ..
 | `-x` | INT | 16 | Short/long finimizer threshold, in characters (1 to 19). Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
 | `-m, --meta` | BOOL | false | Set to `true` for metagenomic indexes (multiple reference genomes) |
-| `--index-format` | INT | 3 | Index format to write. 1 and 2 are the formats of earlier versions of Finimap, kept for comparison; `search-fmin` reads all three |
+| `--index-format` | INT | 3 | Index format to write. 4 stores the color sets as meta-color sets, several times smaller (experimental); 1 and 2 are the formats of earlier versions of Finimap, kept for comparison. `search-fmin` reads all four |
 | `-h, --help` | - | - | Display help message |
 
 #### Parameter Tuning
@@ -168,6 +168,16 @@ cd ..
 
 #### Index formats
 
+- **Format 4** (experimental, `--index-format 4`) is format 3 with the color sets stored as
+  meta-color sets (`include/MetaColorSets.hh`). The colors are ordered by average-linkage
+  clustering of how they co-occur in the color sets (on a sample of 65,536 sets; above 16,384
+  colors the input order is kept), and split into blocks of at most 256 colors that follow the
+  clustering tree. Each block stores its distinct partial sets once, as a list of the colors
+  it has, a list of those it lacks, or a bitmap; each color set is a row of fixed-width ids of
+  its partial sets, one per block. Queries add each distinct partial set of a read once, with
+  the number of the read's finimizers that use it. Estimates on four species
+  (`dev/colorsets/cs_analyze.cpp`) put the color sets at 5 to 10 times smaller than in
+  format 3.
 - **Format 3** (the default) is format 2 with three arrays packed in as many bits as their
   values need: the color set id of each finimizer (23 bits instead of 64 for 3,498 *E. coli*
   genomes), the colors of the listed color sets (12 bits instead of 16 below 4,096 colors), and
@@ -179,7 +189,7 @@ cd ..
 - **Format 1** is the format of earlier versions, with a 32-bit pointer per bucket (4^x / 64
   bytes). It has no signature.
 - `build-fmin --index-format 1` or `2` still writes those formats, byte for byte as before.
-  All three give the same results. `dev/index_sizes.py` reports the size of each part of any
+  All four give the same results. `dev/index_sizes.py` reports the size of each part of any
   of them.
 
 #### Examples

@@ -688,9 +688,12 @@ struct MetaResult
 {
     uint64_t n_blocks = 0, distinct = 0, min_block = 0, max_block = 0;
     double partial_bits = 0;
+    double ids_full = 0;    // fixed-width ids, one per block (index format 4)
     double ids_fixed = 0;   // fixed-width ids per block, or the list of nonempty blocks
     double ids_h0 = 0;      // empirical entropy of each block's ids, plus offsets
     double ids_huffman = 0; // Huffman codes per block, plus offsets
+    double ids_mask = 0;    // a bitmask of the blocks that differ from their most common partial
+                            // set, then fixed-width ids of those, plus offsets
 };
 
 // Sizes with the colors, in the given order, split into blocks of the given sizes
@@ -744,7 +747,7 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, cons
     res.n_blocks = n_blocks;
     res.min_block = *std::min_element(block_sizes.begin(), block_sizes.end());
     res.max_block = *std::max_element(block_sizes.begin(), block_sizes.end());
-    vector<uint64_t> distinct(n_blocks);
+    vector<uint64_t> distinct(n_blocks), common(n_blocks);
     double partial_bits = 0, h0 = 0, huff = 0;
 #pragma omp parallel for schedule(dynamic, 1) reduction(+ : partial_bits, h0, huff)
     for (uint64_t b = 0; b < n_blocks; b++)
@@ -762,6 +765,13 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, cons
             it->second.count++;
         }
         distinct[b] = seen.size();
+        uint64_t most = 0;
+        for (auto &[h, info] : seen)
+            if (info.count > most)
+            {
+                most = info.count;
+                common[b] = h;
+            }
         vector<uint64_t> counts;
         counts.reserve(seen.size());
         for (auto &[h, info] : seen)
@@ -797,11 +807,23 @@ static MetaResult meta_colors(const Sets &s, const vector<uint32_t> &order, cons
         ids_fixed += std::min(fixed, listed) + 1;
     }
     res.ids_fixed = ids_fixed;
+    res.ids_full = fixed * (double)n;
+    double ids_mask = 0;
+#pragma omp parallel for schedule(static) reduction(+ : ids_mask)
+    for (uint64_t i = 0; i < n; i++)
+    {
+        double bits = (double)n_blocks;
+        for (uint64_t b = 0; b < n_blocks; b++)
+            if (hashes[i * n_blocks + b] != common[b])
+                bits += idw[b];
+        ids_mask += bits;
+    }
     // Variable-length ids need the start of each set's codes: Elias-Fano over the starts
     auto with_offsets = [&](double bits)
     { return bits + (double)n * (2.0 + std::max(0.0, std::floor(std::log2(bits / (double)n)))); };
     res.ids_h0 = with_offsets(h0);
     res.ids_huffman = with_offsets(huff);
+    res.ids_mask = with_offsets(ids_mask);
     return res;
 }
 
@@ -816,7 +838,7 @@ int main(int argc, char **argv)
     }
     std::string prefix = argv[1], dump;
     int threads = omp_get_max_threads();
-    bool quick = false, no_ref = false;
+    bool quick = false, no_ref = false, meta_only = false;
     for (int a = 2; a < argc; a++)
     {
         std::string arg = argv[a];
@@ -828,6 +850,8 @@ int main(int argc, char **argv)
             quick = true;
         else if (arg == "--no-ref")
             no_ref = true;
+        else if (arg == "--tree-only")
+            meta_only = true;
         else
         {
             std::cerr << "Unknown argument " << arg << std::endl;
@@ -838,6 +862,11 @@ int main(int argc, char **argv)
     double t0 = now();
     CompressedColoredFinimizers index;
     index.load(prefix);
+    if (index.format >= 4)
+    {
+        std::cerr << prefix << " is in index format 4, whose color sets are already meta-color sets; give an index of format 1 to 3" << std::endl;
+        return 1;
+    }
     const Sets s = read_sets(index);
     const uint64_t C = s.C, n = s.n;
     std::cerr << "Read " << n << " sets in " << now() - t0 << " s" << std::endl;
@@ -975,7 +1004,7 @@ int main(int argc, char **argv)
             const vector<uint32_t> *order;
             bool tree_cut;
         };
-        const vector<Variant> variants = {{"input", &identity, false}, {"chain", &chain, false}, {"tree", &tree.order, false}, {"tree", &tree.order, true}};
+        const vector<Variant> variants = meta_only ? vector<Variant>{{"tree", &tree.order, true}} : vector<Variant>{{"input", &identity, false}, {"chain", &chain, false}, {"tree", &tree.order, false}, {"tree", &tree.order, true}};
         for (const Variant &v : variants)
             for (uint64_t b : sizes)
             {
@@ -983,10 +1012,10 @@ int main(int argc, char **argv)
                 const vector<uint64_t> blocks = v.tree_cut ? tree_blocks(tree, C, b) : fixed_blocks(C, b);
                 const MetaResult m = meta_colors(s, *v.order, blocks);
                 const double best_ids = std::min({m.ids_fixed, m.ids_h0, m.ids_huffman});
-                printf("CS_META order=%s blocks=%s%lu: %s with Huffman ids, %s with fixed-width ids (%lu blocks of %lu-%lu colors; %lu distinct partial sets: %s; ids of each set: fixed %s, Huffman %s, entropy %s); %.0f s\n",
-                       v.order_name, v.tree_cut ? "subtrees<=" : "", b, mb(m.partial_bits + m.ids_huffman).c_str(), mb(m.partial_bits + m.ids_fixed).c_str(),
-                       m.n_blocks, m.min_block, m.max_block, m.distinct, mb(m.partial_bits).c_str(), mb(m.ids_fixed).c_str(), mb(m.ids_huffman).c_str(),
-                       mb(m.ids_h0).c_str(), now() - t);
+                printf("CS_META order=%s blocks=%s%lu: %s with Huffman ids, %s with mask ids, %s with fixed-width ids (%lu blocks of %lu-%lu colors; %lu distinct partial sets: %s; ids of each set: one per block %s, fixed %s, mask %s, Huffman %s, entropy %s); %.0f s\n",
+                       v.order_name, v.tree_cut ? "subtrees<=" : "", b, mb(m.partial_bits + m.ids_huffman).c_str(), mb(m.partial_bits + m.ids_mask).c_str(),
+                       mb(m.partial_bits + m.ids_fixed).c_str(), m.n_blocks, m.min_block, m.max_block, m.distinct, mb(m.partial_bits).c_str(),
+                       mb(m.ids_full).c_str(), mb(m.ids_fixed).c_str(), mb(m.ids_mask).c_str(), mb(m.ids_huffman).c_str(), mb(m.ids_h0).c_str(), now() - t);
                 (void)best_ids;
                 fflush(stdout);
             }

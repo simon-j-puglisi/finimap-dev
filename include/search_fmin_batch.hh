@@ -70,6 +70,7 @@ struct QueryWorker
     uint64_t first_read = 0;  // Number of the batch's first read in the query file
     BatchWorkspace ws;
     ColorCounter counter;
+    MetaColorCounter meta_counter; // index format 4
     ResultFormatter formatter;
     string error;             // Set if handling the batch failed
 
@@ -84,7 +85,7 @@ struct QueryWorker
                 const uint64_t t0 = now_ns();
                 int64_t *ids = ws.finimizers.data() + ws.finimizers_start[i];
                 const uint64_t found = ws.finimizers_start[i + 1] - ws.finimizers_start[i];
-                const int32_t *scores = counter.count(ids, found, index.CCS, index.n_colors);
+                const int32_t *scores = index.format >= 4 ? meta_counter.count(ids, found, index.MCS) : counter.count(ids, found, index.CCS, index.n_colors);
                 const uint64_t t1 = now_ns();
 
                 // No score can exceed the number of k-mers that voted
