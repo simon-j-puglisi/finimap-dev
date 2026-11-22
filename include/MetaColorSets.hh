@@ -3,9 +3,11 @@
 // Meta-color sets (index format 4). The colors are put in an order in which colors that occur
 // in similar color sets are close (color_clustering.hh), and split into blocks of at most 256
 // colors. The part of a color set that falls in a block is a partial set. Each block stores its
-// distinct partial sets once, and each color set is stored as the ids of its partial sets, one
-// fixed-width field per block. Most color sets share most of their partial sets with others, so
-// this takes several times less space than storing each color set on its own.
+// distinct partial sets once, and has a default: its most common partial set. Each color set is
+// stored as a row: a bitmask of the blocks where its partial set is not the default, then the
+// ids of those partial sets, in a fixed number of bits for each block. Most color sets share
+// most of their partial sets with others, so this takes several times less space than storing
+// each color set on its own.
 //
 // Counting the colors of the finimizers of a read adds, block by block, the colors of each
 // distinct partial set once, multiplied by the number of the read's finimizers that use it.
@@ -33,16 +35,17 @@ public:
     static constexpr uint64_t MAX_CLUSTER_COLORS = 16384; // above this, the input order is kept
     static constexpr uint64_t SAMPLE_SETS = 65536;        // sets sampled to compare colors
 
-    uint64_t n_colors = 0, n_sets = 0, n_blocks = 0, row_bits = 0, n_partials = 0;
+    uint64_t n_colors = 0, n_sets = 0, n_blocks = 0, row_bits = 0, n_partials = 0; // row_bits: all rows
     std::vector<uint16_t> order;       // order[p]: the color at position p
     std::vector<uint64_t> block_start; // n_blocks + 1 positions
-    std::vector<uint64_t> width;       // bits of the field of each block (0: one partial set)
-    std::vector<uint64_t> field_off;   // bit offset of each block's field in a row
+    std::vector<uint64_t> width;       // bits of a partial set id of each block (0: one partial set)
+    std::vector<uint64_t> defaults;    // the default partial set of each block
     std::vector<uint64_t> pbase;       // n_blocks + 1: the first partial set of each block
     PackedInts poffset;                // n_partials + 1 byte offsets into pdata
     PackedInts pkind;                  // the kind of each partial set: LIST, ABSENT or BITMAP
     Array<uint8_t> pdata;              // the partial sets
-    Array<uint8_t> rows;               // n_sets rows of row_bits bits, then 8 bytes of padding
+    PackedInts roffset;                // n_sets + 1 bit offsets of the rows
+    Array<uint8_t> rows;               // the rows, then 8 bytes of padding
 
     // Derived, not stored: for counting, each block starts at a multiple of 8 in a padded
     // space of n_padded positions
@@ -96,16 +99,30 @@ public:
     uint64_t block_size(uint64_t b) const { return block_start[b + 1] - block_start[b]; }
     static uint64_t bitmap_bytes(uint64_t size) { return (size + 7) / 8; }
 
-    // The id of the partial set of color set s in block b
-    uint64_t field(uint64_t s, uint64_t b) const
+    // w <= 56 bits of the rows from bit pos
+    uint64_t read_bits(uint64_t pos, uint64_t w) const
     {
-        const uint64_t w = width[b];
-        if (w == 0)
-            return 0;
-        const uint64_t pos = s * row_bits + field_off[b];
         uint64_t v;
         std::memcpy(&v, reinterpret_cast<const uint8_t *>(rows.data()) + (pos >> 3), 8);
         return (v >> (pos & 7)) & ((uint64_t(1) << w) - 1);
+    }
+
+    // Calls f(b, p) for each block b where color set s has a partial set p other than the
+    // block's default, in increasing order of b
+    template <typename F>
+    void for_each_difference(uint64_t s, F f) const
+    {
+        const uint64_t pos = roffset[s];
+        uint64_t idpos = pos + n_blocks;
+        for (uint64_t b0 = 0; b0 < n_blocks; b0 += 56)
+        {
+            for (uint64_t m = read_bits(pos + b0, std::min<uint64_t>(56, n_blocks - b0)); m; m &= m - 1)
+            {
+                const uint64_t b = b0 + __builtin_ctzll(m);
+                f(b, read_bits(idpos, width[b]));
+                idpos += width[b];
+            }
+        }
     }
 
     // Builds the structure from n_sets color sets; get_set(i) returns the words of set i
@@ -171,35 +188,50 @@ public:
             }
         }
 
-        // Field widths and the rows
+        // Id widths, defaults and the rows
         width.assign(n_blocks, 0);
-        field_off.assign(n_blocks, 0);
+        defaults.assign(n_blocks, 0);
         pbase.assign(n_blocks + 1, 0);
-        row_bits = 0;
         for (uint64_t b = 0; b < n_blocks; b++)
         {
             width[b] = bits_for_count(partials[b].size());
             if (width[b] > 32)
                 throw std::runtime_error("MetaColorSets: too many partial sets in a block");
-            field_off[b] = row_bits;
-            row_bits += width[b];
             pbase[b + 1] = pbase[b] + partials[b].size();
+            std::vector<uint64_t> uses(partials[b].size(), 0);
+            for (uint32_t id : ids[b])
+                uses[id]++;
+            defaults[b] = std::max_element(uses.begin(), uses.end()) - uses.begin();
         }
         n_partials = pbase[n_blocks];
-        const uint64_t row_bytes = (n_sets * row_bits + 7) / 8 + 8;
+        std::vector<uint64_t> offsets_rows(n_sets + 1, 0);
+        for (uint64_t i = 0; i < n_sets; i++)
+        {
+            uint64_t bits = n_blocks;
+            for (uint64_t b = 0; b < n_blocks; b++)
+                if (ids[b][i] != defaults[b])
+                    bits += width[b];
+            offsets_rows[i + 1] = offsets_rows[i] + bits;
+        }
+        row_bits = offsets_rows[n_sets];
+        const uint64_t row_bytes = (row_bits + 7) / 8 + 8;
         rows.resize(row_bytes);
         {
             std::vector<uint8_t> buf(row_bytes, 0);
-#pragma omp parallel for schedule(static)
-            for (uint64_t i0 = 0; i0 < n_sets; i0 += 8)
+            for (uint64_t i = 0; i < n_sets; i++)
             {
-                // 8 rows at a time, so that no two threads write the same byte
-                for (uint64_t i = i0; i < std::min(n_sets, i0 + 8); i++)
-                    for (uint64_t b = 0; b < n_blocks; b++)
-                        write_bits(buf.data(), i * row_bits + field_off[b], ids[b][i], width[b]);
+                uint64_t pos = offsets_rows[i], idpos = pos + n_blocks;
+                for (uint64_t b = 0; b < n_blocks; b++)
+                    if (ids[b][i] != defaults[b])
+                    {
+                        buf[(pos + b) >> 3] |= uint8_t(1) << ((pos + b) & 7);
+                        write_bits(buf.data(), idpos, ids[b][i], width[b]);
+                        idpos += width[b];
+                    }
             }
             std::memcpy(&rows[0], buf.data(), row_bytes);
         }
+        roffset.build(offsets_rows.data(), offsets_rows.size(), PackedInts::bits_for(row_bits));
         ids.clear();
 
         // The partial sets
@@ -242,14 +274,14 @@ public:
         prepare();
         std::cerr << "Meta-colors: " << n_blocks << " blocks of " << *std::min_element(sizes.begin(), sizes.end()) << "-"
                   << *std::max_element(sizes.begin(), sizes.end()) << " colors, " << n_partials << " distinct partial sets ("
-                  << (data.size() + poffset.size_in_bytes() + pkind.size_in_bytes()) / 1e6 << " MB), " << row_bits << " bits per color set ("
-                  << row_bytes / 1e6 << " MB)" << std::endl;
+                  << (data.size() + poffset.size_in_bytes() + pkind.size_in_bytes()) / 1e6 << " MB), " << (n_sets ? (double)row_bits / (double)n_sets : 0.0) << " bits per color set ("
+                  << (row_bytes + roffset.size_in_bytes()) / 1e6 << " MB with offsets)" << std::endl;
     }
 
     uint64_t size_in_bytes() const
     {
-        return 6 * 8 + order.size() * 2 + (block_start.size() + width.size() + pbase.size()) * 8 + poffset.size_in_bytes() + pkind.size_in_bytes() + 48 +
-               pdata.size() + 8 + rows.size() + 8;
+        return 6 * 8 + order.size() * 2 + (block_start.size() + width.size() + defaults.size() + pbase.size()) * 8 + poffset.size_in_bytes() + pkind.size_in_bytes() +
+               roffset.size_in_bytes() + 72 + pdata.size() + 8 + rows.size() + 8;
     }
 
     void serialize(std::ostream &out) const
@@ -266,12 +298,15 @@ public:
             u64(v);
         for (uint64_t v : width)
             u64(v);
+        for (uint64_t v : defaults)
+            u64(v);
         for (uint64_t v : pbase)
             u64(v);
         poffset.serialize(out);
         pkind.serialize(out);
         u64(pdata.size());
         out.write(reinterpret_cast<const char *>(pdata.data()), pdata.size());
+        roffset.serialize(out);
         u64(rows.size());
         out.write(reinterpret_cast<const char *>(rows.data()), rows.size());
     }
@@ -299,19 +334,17 @@ public:
         width.resize(n_blocks);
         for (auto &v : width)
             v = u64();
+        defaults.resize(n_blocks);
+        for (auto &v : defaults)
+            v = u64();
         pbase.resize(n_blocks + 1);
         for (auto &v : pbase)
             v = u64();
-        field_off.assign(n_blocks, 0);
-        uint64_t bits = 0;
         for (uint64_t b = 0; b < n_blocks; b++)
-        {
-            if (width[b] > 32 || block_start[b + 1] <= block_start[b] || block_start[b + 1] - block_start[b] > MAX_BLOCK)
+            if (width[b] > 32 || block_start[b + 1] <= block_start[b] || block_start[b + 1] - block_start[b] > MAX_BLOCK ||
+                defaults[b] >= pbase[b + 1] - pbase[b])
                 throw std::runtime_error("The index is inconsistent (meta-color blocks)");
-            field_off[b] = bits;
-            bits += width[b];
-        }
-        if (bits != row_bits || block_start[n_blocks] != n_colors || pbase[n_blocks] != n_partials)
+        if (block_start[n_blocks] != n_colors || pbase[n_blocks] != n_partials)
             throw std::runtime_error("The index is inconsistent (meta-color layout)");
         for (uint16_t c : order)
             if (c >= n_colors)
@@ -320,8 +353,9 @@ public:
         pkind.load(in);
         const uint64_t pdata_size = u64();
         pdata.load(in, pdata_size);
+        roffset.load(in);
         const uint64_t rows_size = u64();
-        if (in && rows_size != (n_sets * row_bits + 7) / 8 + 8)
+        if (in && (rows_size != (row_bits + 7) / 8 + 8 || roffset.size() != n_sets + 1 || roffset[n_sets] != row_bits))
             throw std::runtime_error("The index is inconsistent (meta-color rows)");
         rows.load(in, rows_size);
         if (in && (poffset.size() != n_partials + 1 || pkind.size() != n_partials || poffset[n_partials] + 8 != pdata_size))
@@ -346,6 +380,7 @@ class MetaColorCounter
     // open-addressing table (key: partial id + 1, 0 when free), cleared through `used`
     std::vector<std::pair<uint32_t, uint32_t>> table;
     std::vector<uint32_t> used;
+    std::vector<std::vector<std::pair<uint32_t, uint32_t>>> acc; // per block: (partial id, weight)
 
     void flush(const MetaColorSets &M, uint64_t b, int32_t scale)
     {
@@ -442,40 +477,57 @@ public:
         while ((uint64_t(1) << tbits) < table.size())
             tbits++;
         const uint64_t mask = table.size() - 1;
+        // The partial sets other than the defaults, block by block
+        acc.resize(M.n_blocks);
+        uint64_t total = 0;
+        for (const auto &[s, f] : runs)
+        {
+            total += f;
+            M.for_each_difference((uint64_t)s, [&](uint64_t b, uint64_t p)
+                                  { acc[b].push_back({(uint32_t)p, f}); });
+        }
         for (uint64_t b = 0; b < M.n_blocks; b++)
         {
-            if (M.width[b] == 0)
-                continue; // every set has the empty partial set here
-            used.clear();
-            for (const auto &[s, f] : runs)
-            {
-                const uint64_t p = M.field((uint64_t)s, b);
-                if (p == 0)
-                    continue;
-                const uint32_t key = (uint32_t)p + 1;
-                uint64_t h = ((uint64_t)key * 0x9E3779B97F4A7C15ULL) >> (64 - tbits);
-                while (true)
-                {
-                    auto &slot = table[h];
-                    if (slot.first == 0)
-                    {
-                        slot = {key, f};
-                        used.push_back((uint32_t)h);
-                        break;
-                    }
-                    if (slot.first == key)
-                    {
-                        slot.second += f;
-                        break;
-                    }
-                    h = (h + 1) & mask;
-                }
-            }
+            auto &v = acc[b];
+            // The finimizers whose sets have the default partial set here
+            uint64_t default_weight = total;
+            for (const auto &e : v)
+                default_weight -= e.second;
             uint64_t everywhere = 0;
-            for (uint32_t h : used)
+            if (default_weight && M.defaults[b] != 0)
+                everywhere += add_partial(M, b, M.defaults[b], default_weight);
+            if (!v.empty())
             {
-                everywhere += add_partial(M, b, table[h].first - 1, table[h].second);
-                table[h] = {0, 0};
+                used.clear();
+                for (const auto &[p, f] : v)
+                {
+                    if (p == 0)
+                        continue; // the empty partial set
+                    const uint32_t key = p + 1;
+                    uint64_t h = ((uint64_t)key * 0x9E3779B97F4A7C15ULL) >> (64 - tbits);
+                    while (true)
+                    {
+                        auto &slot = table[h];
+                        if (slot.first == 0)
+                        {
+                            slot = {key, f};
+                            used.push_back((uint32_t)h);
+                            break;
+                        }
+                        if (slot.first == key)
+                        {
+                            slot.second += f;
+                            break;
+                        }
+                        h = (h + 1) & mask;
+                    }
+                }
+                for (uint32_t h : used)
+                {
+                    everywhere += add_partial(M, b, table[h].first - 1, table[h].second);
+                    table[h] = {0, 0};
+                }
+                v.clear();
             }
             flush(M, b, 1);
             if (everywhere)

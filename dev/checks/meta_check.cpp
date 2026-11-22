@@ -19,12 +19,14 @@ static uint64_t rnd(uint64_t n) { return n ? rng() % n : 0; }
 int main(int argc, char **argv)
 {
     const int rounds = argc > 1 ? std::atoi(argv[1]) : 40;
-    uint64_t failures = 0, kinds[3] = {0, 0, 0};
+    uint64_t failures = 0, kinds[3] = {0, 0, 0}, nonempty_defaults = 0, max_blocks = 0;
     for (int r = 0; r < rounds; r++)
     {
-        const uint64_t C = 1 + rnd(r % 5 == 0 ? 2000 : 700);
+        // The last round has more colors than are clustered, and more than 56 blocks
+        const bool big = r == rounds - 1;
+        const uint64_t C = big ? 20000 : 1 + rnd(r % 5 == 0 ? 2000 : 700);
         const uint64_t W = (C + 63) / 64;
-        const uint64_t n_sets = 1 + rnd(3000);
+        const uint64_t n_sets = big ? 300 : 1 + rnd(3000);
         // A few "genome groups": sets take whole groups, with noise
         std::vector<uint64_t> group(C);
         const uint64_t n_groups = 1 + rnd(12);
@@ -59,16 +61,19 @@ int main(int argc, char **argv)
         M.load(ss);
         for (uint64_t g = 0; g < M.n_partials; g++)
             kinds[M.pkind[g]]++;
+        for (uint64_t b = 0; b < M.n_blocks; b++)
+            nonempty_defaults += M.defaults[b] != 0;
+        max_blocks = std::max(max_blocks, M.n_blocks);
         MetaColorCounter counter;
         for (int q = 0; q < 30; q++)
         {
             // A multiset of ids: a few sets with large weights, many with small
             std::vector<int64_t> ids;
-            const uint64_t distinct = 1 + rnd(q % 3 == 0 ? 3 : 200);
+            const uint64_t distinct = 1 + rnd(q % 3 == 0 ? 3 : big ? 20 : 200);
             for (uint64_t d = 0; d < distinct; d++)
             {
                 const int64_t id = (int64_t)rnd(n_sets);
-                const uint64_t w = rnd(4) == 0 ? 1 + rnd(1000) : 1 + rnd(5);
+                const uint64_t w = rnd(4) == 0 ? 1 + rnd(big ? 300 : 1000) : 1 + rnd(5);
                 for (uint64_t k = 0; k < w; k++)
                     ids.push_back(id);
             }
@@ -90,6 +95,6 @@ int main(int argc, char **argv)
         }
     }
     std::cout << "MetaColorSets counting against direct counting: " << (failures ? "FAILED" : "ok") << " (partial sets stored as lists " << kinds[0]
-              << ", as lists of absent colors " << kinds[1] << ", as bitmaps " << kinds[2] << ")\n";
+              << ", as lists of absent colors " << kinds[1] << ", as bitmaps " << kinds[2] << "; " << nonempty_defaults << " blocks with a nonempty default; up to " << max_blocks << " blocks)\n";
     return failures ? 1 : 0;
 }
