@@ -721,22 +721,58 @@ private:
             lane[j] += BIT_EXPAND[ptr[j]] * weight;
     }
 
-    // Adds weight (at most 255) to the lanes of positions [from, to) of block b
-    void add_run(const MetaColorSets &M, uint64_t b, uint64_t from, uint64_t to, uint64_t weight)
+    // The bitmap (in words) of the runs of len bytes at ptr, or of the positions between them
+    // if absent, in a block of size positions: each run toggles a bit at its start and one
+    // past its end, and a prefix xor of the toggles fills the runs in, without branches
+    static void runs_bitmap(const uint8_t *ptr, uint64_t len, bool absent, uint64_t size, uint64_t *bits)
     {
-        constexpr uint64_t ONES = 0x0101010101010101ULL;
-        uint64_t *lane = lanes.data() + M.padded_start[b] / 8;
-        while (from < to)
+        uint64_t t[5] = {0, 0, 0, 0, 0};
+        for (uint64_t j = 0; j < len; j += 2)
         {
-            const uint64_t off = from % 8, take = std::min<uint64_t>(8 - off, to - from);
-            const uint64_t m = take == 8 ? ONES : ONES & ((uint64_t(1) << (8 * take)) - 1);
-            lane[from / 8] += (m << (8 * off)) * weight;
-            from += take;
+            const uint64_t from = ptr[j], to = uint64_t(ptr[j + 1]) + 1;
+            t[from >> 6] ^= uint64_t(1) << (from & 63);
+            t[to >> 6] ^= uint64_t(1) << (to & 63);
+        }
+        uint64_t carry = absent ? ~uint64_t(0) : 0;
+        for (uint64_t w = 0; w < 4; w++)
+        {
+            uint64_t x = t[w];
+            x ^= x << 1;
+            x ^= x << 2;
+            x ^= x << 4;
+            x ^= x << 8;
+            x ^= x << 16;
+            x ^= x << 32;
+            x ^= carry;
+            carry = uint64_t(0) - (x >> 63);
+            const uint64_t keep = size >= 64 * (w + 1) ? ~uint64_t(0) : size <= 64 * w ? 0 : (uint64_t(1) << (size - 64 * w)) - 1;
+            bits[w] = x & keep;
         }
     }
 
     void add_partial(const MetaColorSets &M, uint64_t b, const MetaColorSets::Partial &part, uint64_t weight)
     {
+        if (part.form == MetaColorSets::RUNS || part.form == MetaColorSets::ABSENT_RUNS)
+        {
+            // Runs that cover few positions are added one color at a time, like lists
+            const uint64_t bb = (M.block_size(b) + 7) / 8;
+            uint64_t covered = 0;
+            for (uint64_t j = 0; j < part.len; j += 2)
+                covered += uint64_t(part.ptr[j + 1]) - part.ptr[j] + 1;
+            if (covered <= bb)
+            {
+                const uint16_t *ord = M.order.data() + M.block_start[b];
+                int32_t *c = counts.data();
+                const bool absent = part.form == MetaColorSets::ABSENT_RUNS;
+                const int32_t w = (int32_t)(absent ? -weight : weight);
+                for (uint64_t j = 0; j < part.len; j += 2)
+                    for (uint64_t p = part.ptr[j]; p <= part.ptr[j + 1]; p++)
+                        c[ord[p]] += w;
+                if (absent)
+                    everywhere[b] += weight;
+                return;
+            }
+        }
         if (part.form == MetaColorSets::LIST || part.form == MetaColorSets::ABSENT)
         {
             const uint16_t *ord = M.order.data() + M.block_start[b];
@@ -748,23 +784,17 @@ private:
                 everywhere[b] += weight;
             return;
         }
-        // Runs and bitmaps go to the lanes, runs of absent colors as the runs between them
+        // Runs and bitmaps go to the lanes, runs as the bitmap they make
         auto add = [&](uint64_t wt)
         {
             if (part.form == MetaColorSets::BITMAP)
                 add_bitmap_bytes(M, b, part.ptr, part.len, wt);
-            else if (part.form == MetaColorSets::RUNS)
-                for (uint64_t j = 0; j < part.len; j += 2)
-                    add_run(M, b, part.ptr[j], part.ptr[j + 1] + 1, wt);
             else
             {
-                uint64_t from = 0;
-                for (uint64_t j = 0; j < part.len; j += 2)
-                {
-                    add_run(M, b, from, part.ptr[j], wt);
-                    from = part.ptr[j + 1] + 1;
-                }
-                add_run(M, b, from, M.block_size(b), wt);
+                uint64_t bits[4];
+                const uint64_t size = M.block_size(b);
+                runs_bitmap(part.ptr, part.len, part.form == MetaColorSets::ABSENT_RUNS, size, bits);
+                add_bitmap_bytes(M, b, reinterpret_cast<const uint8_t *>(bits), (size + 7) / 8, wt);
             }
         };
         if (weight > 255)
