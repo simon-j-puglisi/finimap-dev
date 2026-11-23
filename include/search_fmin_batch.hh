@@ -110,6 +110,13 @@ struct QueryWorker
                 }
                 formatter.write(first_read + i, scores, index.n_colors, min_score, found, mode.print_denominator ? static_cast<int64_t>(denominator) : -1);
                 ws.times.count += t1 - t0;
+                if (index.format >= 4)
+                {
+                    ws.times.count_rows += meta_counter.t_rows;
+                    ws.times.count_read += meta_counter.t_read;
+                    ws.times.count_add += meta_counter.t_add;
+                    meta_counter.t_rows = meta_counter.t_read = meta_counter.t_add = 0;
+                }
                 ws.times.format += now_ns() - t1;
             }
         }
@@ -396,6 +403,10 @@ int search_fmin_batch(int argc, char **argv)
             cerr << ", of which in runs shorter than " << mode.min_run << " (not counted): " << summary.times.kmers_in_short_runs;
         cerr << endl;
     }
+    if (index.format >= 4)
+        cerr << "Counting colors by part (s, summed over threads): finding rows " << seconds(summary.times.count_rows)
+             << ", reading rows " << seconds(summary.times.count_read)
+             << ", adding partial sets " << seconds(summary.times.count_add) << endl;
     if (summary.times.scanned_reads > 0)
         cerr << "Reads whose finimizers did not end in order (handled by the slower picker): " << summary.times.scanned_reads << endl;
 

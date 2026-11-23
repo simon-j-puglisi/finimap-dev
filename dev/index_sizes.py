@@ -28,7 +28,7 @@ def report(prefix):
         sparse_count = dense_count = bits = 0
         meta = None
         if fmt >= 4:
-            mc_colors, mc_sets, mc_blocks, mc_row_bits, mc_partials = [u64(f) for _ in range(5)]
+            mc_colors, mc_sets, mc_blocks, mc_layout, mc_row_bits, mc_partials = [u64(f) for _ in range(6)]
             skip("color sets: meta-color layout (color order, blocks)", mc_colors * 2 + (4 * mc_blocks + 2) * 8)
             po_n, po_bits, po_bytes = u64(f), u64(f), u64(f)
             skip("color sets: partial set offsets", po_bytes, "%d bits each" % po_bits)
@@ -39,7 +39,10 @@ def report(prefix):
             ro_n, ro_bits, ro_bytes = u64(f), u64(f), u64(f)
             skip("color sets: row offsets", ro_bytes, "%d bits each" % ro_bits)
             rows = u64(f)
-            skip("color sets: rows (blocks off the default, their partial set ids)", rows, "%d color sets, %.1f bits each on average" % (mc_sets, mc_row_bits / max(1, mc_sets)))
+            if mc_layout == 0:
+                skip("color sets: rows (blocks off the default, their partial set ids)", rows, "%d color sets, %.1f bits each on average" % (mc_sets, mc_row_bits / max(1, mc_sets)))
+            else:
+                skip("color sets: rows (a partial set id for every block)", rows, "%d color sets, %d bits each" % (mc_sets, mc_row_bits // max(1, mc_sets)))
             meta = (mc_sets, mc_blocks, mc_partials)
         else:
             sparse_count, dense_count = u64(f), u64(f)

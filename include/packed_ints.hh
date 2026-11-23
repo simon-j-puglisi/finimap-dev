@@ -53,6 +53,12 @@ public:
     uint64_t bits() const { return width; }
     uint64_t size_in_bytes() const { return bytes.size(); }
 
+    // The address of the byte where value i starts, for prefetching
+    const void *address(const size_t i) const
+    {
+        return reinterpret_cast<const uint8_t *>(bytes.data()) + ((i * width) >> 3);
+    }
+
     uint64_t operator[](const size_t i) const
     {
         const uint64_t pos = i * width;

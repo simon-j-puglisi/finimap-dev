@@ -31,6 +31,7 @@ struct QueryTimes
     uint64_t filter = 0;  // Testing k-mers for membership (found-in-index mode)
     uint64_t pick = 0;    // Picking the finimizer of each k-mer
     uint64_t count = 0;   // Counting colors
+    uint64_t count_rows = 0, count_read = 0, count_add = 0; // ... in index format 4: its parts
     uint64_t format = 0;  // Thresholding and formatting the result lines
     uint64_t scanned_reads = 0; // Reads whose finimizers were picked by the scanning version
     uint64_t kmers_passed = 0;  // Found-in-index mode: k-mers that passed the filter
@@ -43,6 +44,9 @@ struct QueryTimes
         filter += o.filter;
         pick += o.pick;
         count += o.count;
+        count_rows += o.count_rows;
+        count_read += o.count_read;
+        count_add += o.count_add;
         format += o.format;
         scanned_reads += o.scanned_reads;
         kmers_passed += o.kmers_passed;

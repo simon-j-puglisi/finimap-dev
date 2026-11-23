@@ -10,7 +10,8 @@
 #   FM_CFM        the stage 1 output to build from (required)
 #   FM_QUERIES    directory of query files *.fna (required)
 #   FM_REF_OUT    directory with reference results, NAME.txt (required)
-#   FM_FORMATS    formats to compare (default "1 2")
+#   FM_FORMATS    formats to compare (default "1 2"); "4x" is format 4 with fixed rows
+#                 (--meta-rows fixed)
 #   FM_X          -x for every index (default 16)
 #   FM_P          prefix length (default 10)     FM_K   k (default 31)
 #   FM_OUT        output directory (default: the current directory)
@@ -43,7 +44,9 @@ done
 for F in $FORMATS; do
     echo "=== building format $F with -x $X"
     mkdir -p "$OUT/f$F"
-    (cd "$OUT/f$F" && FM_CFM=$CFM FM_X=$X FM_FORMAT=$F FM_OUT=$OUT/f$F bash "$REPO/dev/stage2.sh") > "$OUT/f$F.build.out" 2>&1 \
+    META_ROWS=""
+    [ "${F%x}" != "$F" ] && META_ROWS=fixed
+    (cd "$OUT/f$F" && FM_CFM=$CFM FM_X=$X FM_FORMAT=${F%x} FM_META_ROWS=$META_ROWS FM_OUT=$OUT/f$F bash "$REPO/dev/stage2.sh") > "$OUT/f$F.build.out" 2>&1 \
         || { echo "FM_ERROR build failed for format $F:"; tail -n 20 "$OUT/f$F.build.out"; exit 1; }
     grep -E '^(wall_s|peak_rss_gb)|n_short_fmin' "$OUT/f$F.build.out" | tr '\n' ' '; echo
 done
@@ -74,9 +77,12 @@ for run in runs:
             se = open(os.path.join(out, "q" + run, name + ".stderr")).read()
             m = re.search(r"index load ([0-9.]+), search ([0-9.]+)", se)
             part = lambda p: (re.search(p + r" ([0-9.]+)", se) or [None, "n/a"])[1]
-            rows.setdefault(name, {})[run] = "identical=%s wall=%s load=%s search=%s lookups=%s pick=%s count=%s" % (
+            parts = ""
+            if "finding rows" in se:
+                parts = " (rows %s, read %s, add %s)" % (part("finding rows"), part("reading rows"), part("adding partial sets"))
+            rows.setdefault(name, {})[run] = "identical=%s wall=%s load=%s search=%s lookups=%s pick=%s count=%s%s" % (
                 fields.get("identical"), fields.get("wall_s"), m.group(1) if m else "n/a", m.group(2) if m else "n/a",
-                part("finimizer lookups"), part("picking finimizers"), part("counting colors"))
+                part("finimizer lookups"), part("picking finimizers"), part("counting colors"), parts)
 for name in sorted(rows):
     print("FM_FORMAT %s | " % name + " | ".join("%s: %s" % (run, rows[name][run]) for run in runs if run in rows[name]))
 PY

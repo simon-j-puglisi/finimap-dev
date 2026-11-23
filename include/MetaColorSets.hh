@@ -4,15 +4,18 @@
 // in similar color sets are close (color_clustering.hh), and split into blocks of at most 256
 // colors. The part of a color set that falls in a block is a partial set. Each block stores its
 // distinct partial sets once, and has a default: its most common partial set. Each color set is
-// stored as a row: a bitmask of the blocks where its partial set is not the default, then the
-// ids of those partial sets, in a fixed number of bits for each block. Most color sets share
-// most of their partial sets with others, so this takes several times less space than storing
-// each color set on its own.
+// stored as a row, in one of two layouts:
+//   - MASK: a bitmask of the blocks where its partial set is not the default, then the ids of
+//     those partial sets, in a fixed number of bits for each block; rows have offsets;
+//   - FIXED: the id of its partial set in every block; all rows have the same length.
+// Most color sets share most of their partial sets with others, so this takes several times less
+// space than storing each color set on its own.
 //
 // Counting the colors of the finimizers of a read adds, block by block, the colors of each
 // distinct partial set once, multiplied by the number of the read's finimizers that use it.
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -35,7 +38,13 @@ public:
     static constexpr uint64_t MAX_CLUSTER_COLORS = 16384; // above this, the input order is kept
     static constexpr uint64_t SAMPLE_SETS = 65536;        // sets sampled to compare colors
 
+    static constexpr uint64_t MASK = 0, FIXED = 1;
+    static inline uint64_t build_layout = MASK; // the row layout that build() uses
+
     uint64_t n_colors = 0, n_sets = 0, n_blocks = 0, row_bits = 0, n_partials = 0; // row_bits: all rows
+    uint64_t layout = MASK;
+    std::vector<uint64_t> field_off; // FIXED: the bit offset of each block's id in a row
+    uint64_t row_len = 0;            // FIXED: bits of a row
     std::vector<uint16_t> order;       // order[p]: the color at position p
     std::vector<uint64_t> block_start; // n_blocks + 1 positions
     std::vector<uint64_t> width;       // bits of a partial set id of each block (0: one partial set)
@@ -107,12 +116,39 @@ public:
         return (v >> (pos & 7)) & ((uint64_t(1) << w) - 1);
     }
 
-    // Calls f(b, p) for each block b where color set s has a partial set p other than the
-    // block's default, in increasing order of b
-    template <typename F>
-    void for_each_difference(uint64_t s, F f) const
+    // The bit position of the row of color set s, and a prefetch of what is needed to find it
+    uint64_t row_position(uint64_t s) const { return layout == MASK ? roffset[s] : s * row_len; }
+    void prefetch_position(uint64_t s) const
     {
-        const uint64_t pos = roffset[s];
+        if (layout == MASK)
+            __builtin_prefetch(roffset.address(s));
+        else
+            prefetch_row(s * row_len);
+    }
+    void prefetch_row(uint64_t pos) const
+    {
+        const uint8_t *p = reinterpret_cast<const uint8_t *>(rows.data()) + (pos >> 3);
+        __builtin_prefetch(p);
+        __builtin_prefetch(p + 64);
+    }
+
+    // Calls f(b, p) for each block b where the color set whose row starts at bit pos has a
+    // partial set p other than the block's default, in increasing order of b
+    template <typename F>
+    void for_each_difference_at(uint64_t pos, F f) const
+    {
+        if (layout == FIXED)
+        {
+            for (uint64_t b = 0; b < n_blocks; b++)
+            {
+                if (width[b] == 0)
+                    continue;
+                const uint64_t p = read_bits(pos + field_off[b], width[b]);
+                if (p != defaults[b])
+                    f(b, p);
+            }
+            return;
+        }
         uint64_t idpos = pos + n_blocks;
         for (uint64_t b0 = 0; b0 < n_blocks; b0 += 56)
         {
@@ -124,6 +160,9 @@ public:
             }
         }
     }
+
+    template <typename F>
+    void for_each_difference(uint64_t s, F f) const { for_each_difference_at(row_position(s), f); }
 
     // Builds the structure from n_sets color sets; get_set(i) returns the words of set i
     // (n_colors bits). Set i gets color set id i.
@@ -204,13 +243,22 @@ public:
             defaults[b] = std::max_element(uses.begin(), uses.end()) - uses.begin();
         }
         n_partials = pbase[n_blocks];
+        layout = build_layout;
+        field_off.assign(n_blocks, 0);
+        row_len = 0;
+        for (uint64_t b = 0; b < n_blocks; b++)
+        {
+            field_off[b] = row_len;
+            row_len += width[b];
+        }
         std::vector<uint64_t> offsets_rows(n_sets + 1, 0);
         for (uint64_t i = 0; i < n_sets; i++)
         {
-            uint64_t bits = n_blocks;
-            for (uint64_t b = 0; b < n_blocks; b++)
-                if (ids[b][i] != defaults[b])
-                    bits += width[b];
+            uint64_t bits = layout == FIXED ? row_len : n_blocks;
+            if (layout == MASK)
+                for (uint64_t b = 0; b < n_blocks; b++)
+                    if (ids[b][i] != defaults[b])
+                        bits += width[b];
             offsets_rows[i + 1] = offsets_rows[i] + bits;
         }
         row_bits = offsets_rows[n_sets];
@@ -222,16 +270,26 @@ public:
             {
                 uint64_t pos = offsets_rows[i], idpos = pos + n_blocks;
                 for (uint64_t b = 0; b < n_blocks; b++)
-                    if (ids[b][i] != defaults[b])
+                {
+                    if (layout == FIXED)
+                        write_bits(buf.data(), pos + field_off[b], ids[b][i], width[b]);
+                    else if (ids[b][i] != defaults[b])
                     {
                         buf[(pos + b) >> 3] |= uint8_t(1) << ((pos + b) & 7);
                         write_bits(buf.data(), idpos, ids[b][i], width[b]);
                         idpos += width[b];
                     }
+                }
             }
             std::memcpy(&rows[0], buf.data(), row_bytes);
         }
-        roffset.build(offsets_rows.data(), offsets_rows.size(), PackedInts::bits_for(row_bits));
+        if (layout == MASK)
+            roffset.build(offsets_rows.data(), offsets_rows.size(), PackedInts::bits_for(row_bits));
+        else
+        {
+            const uint64_t none = 0;
+            roffset.build(&none, 0, 1);
+        }
         ids.clear();
 
         // The partial sets
@@ -274,14 +332,14 @@ public:
         prepare();
         std::cerr << "Meta-colors: " << n_blocks << " blocks of " << *std::min_element(sizes.begin(), sizes.end()) << "-"
                   << *std::max_element(sizes.begin(), sizes.end()) << " colors, " << n_partials << " distinct partial sets ("
-                  << (data.size() + poffset.size_in_bytes() + pkind.size_in_bytes()) / 1e6 << " MB), " << (n_sets ? (double)row_bits / (double)n_sets : 0.0) << " bits per color set ("
+                  << (data.size() + poffset.size_in_bytes() + pkind.size_in_bytes()) / 1e6 << " MB), " << (n_sets ? (double)row_bits / (double)n_sets : 0.0) << " bits per color set in " << (layout == MASK ? "masked" : "fixed") << " rows ("
                   << (row_bytes + roffset.size_in_bytes()) / 1e6 << " MB with offsets)" << std::endl;
     }
 
     uint64_t size_in_bytes() const
     {
         return 6 * 8 + order.size() * 2 + (block_start.size() + width.size() + defaults.size() + pbase.size()) * 8 + poffset.size_in_bytes() + pkind.size_in_bytes() +
-               roffset.size_in_bytes() + 72 + pdata.size() + 8 + rows.size() + 8;
+               roffset.size_in_bytes() + 80 + pdata.size() + 8 + rows.size() + 8;
     }
 
     void serialize(std::ostream &out) const
@@ -291,6 +349,7 @@ public:
         u64(n_colors);
         u64(n_sets);
         u64(n_blocks);
+        u64(layout);
         u64(row_bits);
         u64(n_partials);
         out.write(reinterpret_cast<const char *>(order.data()), order.size() * 2);
@@ -322,8 +381,11 @@ public:
         n_colors = u64();
         n_sets = u64();
         n_blocks = u64();
+        layout = u64();
         row_bits = u64();
         n_partials = u64();
+        if (layout != MASK && layout != FIXED)
+            throw std::runtime_error("The index is inconsistent (meta-color row layout)");
         if (!in || n_colors == 0 || n_colors > 65535 || n_blocks == 0 || n_blocks > n_colors)
             throw std::runtime_error("The index is inconsistent (meta-color sets)");
         order.resize(n_colors);
@@ -344,6 +406,13 @@ public:
             if (width[b] > 32 || block_start[b + 1] <= block_start[b] || block_start[b + 1] - block_start[b] > MAX_BLOCK ||
                 defaults[b] >= pbase[b + 1] - pbase[b])
                 throw std::runtime_error("The index is inconsistent (meta-color blocks)");
+        field_off.assign(n_blocks, 0);
+        row_len = 0;
+        for (uint64_t b = 0; b < n_blocks; b++)
+        {
+            field_off[b] = row_len;
+            row_len += width[b];
+        }
         if (block_start[n_blocks] != n_colors || pbase[n_blocks] != n_partials)
             throw std::runtime_error("The index is inconsistent (meta-color layout)");
         for (uint16_t c : order)
@@ -355,7 +424,8 @@ public:
         pdata.load(in, pdata_size);
         roffset.load(in);
         const uint64_t rows_size = u64();
-        if (in && (rows_size != (row_bits + 7) / 8 + 8 || roffset.size() != n_sets + 1 || roffset[n_sets] != row_bits))
+        if (in && (rows_size != (row_bits + 7) / 8 + 8 ||
+                   (layout == MASK ? (roffset.size() != n_sets + 1 || roffset[n_sets] != row_bits) : row_bits != n_sets * row_len)))
             throw std::runtime_error("The index is inconsistent (meta-color rows)");
         rows.load(in, rows_size);
         if (in && (poffset.size() != n_partials + 1 || pkind.size() != n_partials || poffset[n_partials] + 8 != pdata_size))
@@ -381,6 +451,20 @@ class MetaColorCounter
     std::vector<std::pair<uint32_t, uint32_t>> table;
     std::vector<uint32_t> used;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> acc; // per block: (partial id, weight)
+    std::vector<uint64_t> diff_weight; // per block: the weight of the partial sets in acc
+    std::vector<uint64_t> positions;   // the row of each run
+
+    static uint64_t clock_ns()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+public:
+    // Time spent, in ns: finding the rows (with prefetching), reading them, and adding the
+    // partial sets. The caller may read and reset these.
+    uint64_t t_rows = 0, t_read = 0, t_add = 0;
+
+private:
 
     void flush(const MetaColorSets &M, uint64_t b, int32_t scale)
     {
@@ -477,22 +561,36 @@ public:
         while ((uint64_t(1) << tbits) < table.size())
             tbits++;
         const uint64_t mask = table.size() - 1;
+        const uint64_t t0 = clock_ns();
+        // Find the rows, prefetching what each step needs before it is read
+        for (const auto &r : runs)
+            M.prefetch_position((uint64_t)r.first);
+        positions.resize(runs.size());
+        for (size_t i = 0; i < runs.size(); i++)
+        {
+            positions[i] = M.row_position((uint64_t)runs[i].first);
+            if (M.layout == MetaColorSets::MASK)
+                M.prefetch_row(positions[i]);
+        }
+        const uint64_t t1 = clock_ns();
         // The partial sets other than the defaults, block by block
         acc.resize(M.n_blocks);
+        diff_weight.assign(M.n_blocks, 0);
         uint64_t total = 0;
-        for (const auto &[s, f] : runs)
+        for (size_t i = 0; i < runs.size(); i++)
         {
+            const uint32_t f = runs[i].second;
             total += f;
-            M.for_each_difference((uint64_t)s, [&](uint64_t b, uint64_t p)
-                                  { acc[b].push_back({(uint32_t)p, f}); });
+            M.for_each_difference_at(positions[i], [&](uint64_t b, uint64_t p)
+                                     { acc[b].push_back({(uint32_t)p, f});
+                                       diff_weight[b] += f; });
         }
+        const uint64_t t2 = clock_ns();
         for (uint64_t b = 0; b < M.n_blocks; b++)
         {
             auto &v = acc[b];
             // The finimizers whose sets have the default partial set here
-            uint64_t default_weight = total;
-            for (const auto &e : v)
-                default_weight -= e.second;
+            const uint64_t default_weight = total - diff_weight[b];
             uint64_t everywhere = 0;
             if (default_weight && M.defaults[b] != 0)
                 everywhere += add_partial(M, b, M.defaults[b], default_weight);
@@ -537,6 +635,10 @@ public:
                     counts[ord[j]] += (int32_t)everywhere;
             }
         }
+        const uint64_t t3 = clock_ns();
+        t_rows += t1 - t0;
+        t_read += t2 - t1;
+        t_add += t3 - t2;
         return counts.data();
     }
 };
