@@ -172,13 +172,14 @@ cd ..
   meta-color sets (`include/MetaColorSets.hh`). The colors are ordered by average-linkage
   clustering of how they co-occur in the color sets (on a sample of 65,536 sets; above 16,384
   colors the input order is kept), and split into blocks of at most 256 colors that follow the
-  clustering tree. Each block stores its distinct partial sets once, as a list of the colors
-  it has, a list of those it lacks, or a bitmap, and has a default: its most common partial
+  clustering tree. Each block stores its distinct partial sets once, in the smallest of five
+  forms: a list of the colors it has or of those it lacks, the runs of consecutive colors it
+  has or lacks, or a bitmap. Each block has a default: its most common partial
   set. Each color set is a row: a bitmask of the blocks where its partial set is not the
   default, then the ids of those partial sets in a canonical Huffman code of each block.
   Queries add each distinct partial set of a read once, with the number of the read's
-  finimizers that use it. Format 4 also stores the long finimizers in 67 - 2p bits each
-  instead of 64 (47 at the default `-p 10`).
+  finimizers that use it. Format 4 also stores the long finimizers in 67 - 2p bits rounded
+  up to whole bytes instead of 64 (48 at the default `-p 10`).
 - **Format 3** (the default) is format 2 with three arrays packed in as many bits as their
   values need: the color set id of each finimizer (23 bits instead of 64 for 3,498 *E. coli*
   genomes), the colors of the listed color sets (12 bits instead of 16 below 4,096 colors), and

@@ -5,6 +5,7 @@
 #include "mapped_array.hh"
 #include "packed_ints.hh"
 #include <bit>
+#include <cstring>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -151,12 +152,12 @@ class PrefTab {
         //cerr << "v: " << v << '\n';
         uint32_t i = v;
         for(;i<v+blen;i++){
-           //cerr << "key: " << key << " curr: " << ((F(i)>>preflenbits)<<preflenbits) <<'\n';
-           if(((F(i)>>preflenbits)<<preflenbits)>=key){
+           //cerr << "key: " << key << " curr: " << A(i) <<'\n';
+           if(A(i)>=key){
               break;
            }
         }
-        return {i-(((F(i)>>preflenbits)<<preflenbits)==key), (((F(i)>>preflenbits)<<preflenbits)==key)};
+        return {i-(A(i)==key), (A(i)==key)};
     }
 
     pair<int64_t, uint64_t> finiLookup(uint64_t key, uint64_t keylen) const{
@@ -176,7 +177,7 @@ class PrefTab {
        //cerr << "Non-empty bucket\n";
        v = v >> 1;
        //check if we are smaller than everything in our bucket
-       if(((F(v)>>preflenbits)<<preflenbits)>key){
+       if(A(v)>key){
           //cerr << "No predecessor in bucket\n";
           return {-1,0};
        }
@@ -189,14 +190,14 @@ class PrefTab {
        if(blen < BIN_SEARCH_THRESHOLD){
           //cerr << "Scanning search: " << blen << " items \n";
           for(;i<v+blen;i++){
-             //cerr << "Item: " << (i-v) << ", key: " << key << " curr: " << ((F(i)>>preflenbits)<<preflenbits) <<'\n';
-             if(((F(i)>>preflenbits)<<preflenbits)>=key){
+             //cerr << "Item: " << (i-v) << ", key: " << key << " curr: " << A(i) <<'\n';
+             if(A(i)>=key){
                 //cerr << "breaking\n";
                 break;
              }
           }
           //cerr << "Normal i: "<<i<<'\n';
-          //cerr << "Equal to key? " << (((F(i)>>preflenbits)<<preflenbits)==key)<<'\n';
+          //cerr << "Equal to key? " << (A(i)==key)<<'\n';
        }
        else{
           //cerr << "Binary search...\n";
@@ -204,7 +205,7 @@ class PrefTab {
           uint32_t high = v+blen-1;
           while(low <= high){
              uint32_t mid = (low + high) >> 1;
-             uint64_t midVal = ((F(mid)>>preflenbits)<<preflenbits);
+             uint64_t midVal = A(mid);
              if (midVal < key){
                 low = mid + 1;
                 i = low; //key not found, low is the index of the first element greater than key
@@ -221,12 +222,12 @@ class PrefTab {
        if(i == (v + blen)){
           i--; //i now points to the predecessor
        }else{
-          i -= (1 - (((F(i)>>preflenbits)<<preflenbits)==key)); //i now points to the predecessor
+          i -= (1 - (A(i)==key)); //i now points to the predecessor
        }
        //cerr << "Adjust i: " << i << '\n';
        //compute the LCP between the query and the predecessor
-       uint64_t el = (F(i) & (((uint64_t)1)<<preflenbits)-((uint64_t)1)); //the length of the finimizer
-       uint64_t pred = ((F(i)>>preflenbits)<<preflenbits);
+       uint64_t el = len(i); //the length of the finimizer
+       uint64_t pred = A(i);
        //uint64_t lcp = (__builtin_clzll((F(i)>>preflenbits) ^ (~(key >> preflenbits))) - preflenbits)/2;
        uint64_t lcp = countl_zero(~((pred) ^ (~key)));
        lcp = _preflen + (lcp >> 1); //convert from bit matches to symbol matches
@@ -235,7 +236,7 @@ class PrefTab {
           return {i,el};
        }
        return {-1,0};
-       //{i-(((F(i)>>preflenbits)<<preflenbits)==key), (((F(i)>>preflenbits)<<preflenbits)==key)};
+       //{i-(A(i)==key), (A(i)==key)};
     }
 
     // Finimizer i: its characters after the prefix, from the top bit, and its length in the
@@ -244,12 +245,37 @@ class PrefTab {
     uint64_t F(uint64_t i) const
     {
        if(!_packed) return _F[i];
-       const uint64_t v = _Fp[i];
+       const uint64_t v = packed_value(i);
        return ((v >> 5) << _fshift) | (v & 31);
     }
 
+    // The characters of finimizer i after the prefix, from the top bit (F(i) without its length)
+    uint64_t A(uint64_t i) const
+    {
+       if(!_packed){
+          const uint64_t pl = _preflen << 1;
+          return (_F[i] >> pl) << pl;
+       }
+       return (packed_value(i) >> 5) << _fshift;
+    }
+
+    // The length of finimizer i
+    uint64_t len(uint64_t i) const
+    {
+       return _packed ? (packed_value(i) & 31) : (_F[i] & ((((uint64_t)1) << (_preflen << 1)) - 1));
+    }
+
+    // The packed values take a whole number of bytes, so that each is one unaligned load
+    static uint64_t packed_width(uint64_t preflen) { return (67 - 2*preflen + 7) / 8 * 8; }
     // Whether index format 4 stores the finimizers packed with this prefix length
-    static bool packs(uint64_t preflen) { return preflen >= 5 && preflen <= 30; }
+    static bool packs(uint64_t preflen) { return preflen >= 6 && preflen <= 30; }
+
+    uint64_t packed_value(uint64_t i) const
+    {
+       uint64_t v;
+       std::memcpy(&v, _fbytes + i * _fstride, 8);
+       return v & _fmask;
+    }
 
     uint64_t sizeInBytes() const{
        uint64_t sz = 0;
@@ -278,7 +304,7 @@ class PrefTab {
              packed[i] = ((f >> shift) << 5) | (f & 31);
           }
           PackedInts p;
-          p.build(packed.data(), packed.size(), 67 - 2*_preflen);
+          p.build(packed.data(), packed.size(), packed_width(_preflen));
           p.serialize(os);
           written += p.size_in_bytes() + 24;
        }else{
@@ -302,8 +328,11 @@ class PrefTab {
        _fshift = 2*_preflen + 2;
        if(_packed){
           _Fp.load(is);
-          if(is && (_Fp.size() != _nfins || _Fp.bits() != 67 - 2*_preflen))
+          if(is && (_Fp.size() != _nfins || _Fp.bits() != packed_width(_preflen)))
              throw std::runtime_error("The index is inconsistent (long finimizers)");
+          _fbytes = reinterpret_cast<const uint8_t *>(_Fp.address(0));
+          _fstride = _Fp.bits() / 8;
+          _fmask = _Fp.bits() >= 64 ? ~(uint64_t)0 : (((uint64_t)1) << _Fp.bits()) - 1;
        }else{
           _F.load(is, _nfins);
        }
@@ -322,6 +351,8 @@ class PrefTab {
     PackedInts _Fp;       // index format 4
     bool _packed = false;
     uint64_t _fshift = 0;
+    const uint8_t *_fbytes = nullptr; // format 4: the packed values, _fstride bytes each
+    uint64_t _fstride = 8, _fmask = ~(uint64_t)0;
 };
 
 #endif

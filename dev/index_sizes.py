@@ -81,7 +81,7 @@ def report(prefix):
             skip("short finimizers: lengths", f8_n)
         preflen, nprefs, nfins = u64(f), u64(f), u64(f)
         skip("long finimizers: prefix table (size set by -p)", (nprefs + 1) * 4, "%d prefixes of length %d" % (nprefs, preflen))
-        if fmt >= 4 and 5 <= preflen <= 30:
+        if fmt >= 4 and 6 <= preflen <= 30:
             k_n, k_bits, k_bytes = u64(f), u64(f), u64(f)
             skip("long finimizers: keys", k_bytes, "%d long finimizers, %d bits each" % (nfins, k_bits))
         else:

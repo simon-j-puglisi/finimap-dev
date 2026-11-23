@@ -19,7 +19,7 @@ static uint64_t rnd(uint64_t n) { return n ? rng() % n : 0; }
 int main(int argc, char **argv)
 {
     const int rounds = argc > 1 ? std::atoi(argv[1]) : 40;
-    uint64_t failures = 0, kinds[3] = {0, 0, 0}, nonempty_defaults = 0, max_blocks = 0, max_code = 0;
+    uint64_t failures = 0, kinds[5] = {0, 0, 0, 0, 0}, nonempty_defaults = 0, max_blocks = 0, max_code = 0;
     for (int r = 0; r < rounds; r++)
     {
         // The last round has more colors than are clustered, and more than 56 blocks
@@ -59,8 +59,9 @@ int main(int argc, char **argv)
         built.serialize(ss);
         MetaColorSets M;
         M.load(ss);
-        for (uint64_t g = 0; g < M.n_partials; g++)
-            kinds[M.partial(g).form]++;
+        for (uint64_t b = 0; b < M.n_blocks; b++)
+            for (uint64_t g = M.pbase[b]; g < M.pbase[b + 1]; g++)
+                kinds[M.partial(g, b).form]++;
         for (uint64_t b = 0; b < M.n_blocks; b++)
             nonempty_defaults += M.defaults[b] != M.empty_id[b];
         max_blocks = std::max(max_blocks, M.n_blocks);
@@ -98,7 +99,7 @@ int main(int argc, char **argv)
                 }
         }
     }
-    std::cout << "MetaColorSets counting against direct counting: " << (failures ? "FAILED" : "ok") << " (partial sets stored as lists " << kinds[0]
-              << ", as lists of absent colors " << kinds[1] << ", as bitmaps " << kinds[2] << "; " << nonempty_defaults << " blocks with a nonempty default; up to " << max_blocks << " blocks; codes up to " << max_code << " bits)\n";
+    std::cout << "MetaColorSets counting against direct counting: " << (failures ? "FAILED" : "ok") << " (partial sets stored as lists " << kinds[0] << ", as lists of absent colors " << kinds[1]
+              << ", as runs " << kinds[2] << ", as runs of absent colors " << kinds[3] << ", as bitmaps " << kinds[4] << "; " << nonempty_defaults << " blocks with a nonempty default; up to " << max_blocks << " blocks; codes up to " << max_code << " bits)\n";
     return failures ? 1 : 0;
 }

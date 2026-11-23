@@ -11,8 +11,10 @@
 // of their codes, so that a decoded code is the partial set's id. Rows start at offsets kept for
 // groups of ROW_GROUP rows plus a short offset within the group.
 //
-// Partial sets are stored in the smallest of three forms: the list of their positions in the
-// block (one byte each), the list of the positions they lack, or a bitmap. For each group of 8
+// Partial sets are stored in the smallest of five forms: the list of their positions in the
+// block (one byte each), the list of the positions they lack, their runs of consecutive
+// positions or the runs of positions they lack (first and last position, a byte each), or a
+// bitmap. For each group of 8
 // partial sets there is a record of the byte offset of the first, then one byte per partial set
 // holding its length in bytes and its form.
 //
@@ -50,8 +52,11 @@ public:
     static constexpr uint64_t RECORD_BYTES = 4 + PART_GROUP;
     static constexpr uint64_t NONE = ~uint64_t(0);
 
-    // The forms of a partial set
-    static constexpr uint64_t LIST = 0, ABSENT = 1, BITMAP = 2;
+    // The forms of a partial set: a list of its positions in the block, one byte each; the same
+    // for the positions it lacks; its runs of consecutive positions, or the runs of positions it
+    // lacks, two bytes each (first and last position); a bitmap. A bitmap is the only form that
+    // takes as many bytes as the bitmap of the block, so its record stores the form as LIST.
+    static constexpr uint64_t LIST = 0, ABSENT = 1, RUNS = 2, ABSENT_RUNS = 3, BITMAP = 4;
 
     uint64_t n_colors = 0, n_sets = 0, n_blocks = 0, row_bits = 0, n_partials = 0;
     std::vector<uint16_t> order;       // order[p]: the color at position p
@@ -266,7 +271,7 @@ public:
     template <typename F>
     void for_each_difference(uint64_t s, F f) const { for_each_difference_at(row_position(s), f); }
 
-    // Partial set g (over all blocks): where its bytes are, how many, and its form
+    // Partial set g (over all blocks), of block b: where its bytes are, how many, and its form
     struct Partial
     {
         const uint8_t *ptr;
@@ -276,7 +281,7 @@ public:
     {
         return reinterpret_cast<const uint8_t *>(precords.data()) + (g / PART_GROUP) * RECORD_BYTES;
     }
-    Partial partial(uint64_t g) const
+    Partial partial(uint64_t g, uint64_t b) const
     {
         const uint8_t *rec = reinterpret_cast<const uint8_t *>(partial_record(g));
         uint32_t base;
@@ -287,7 +292,9 @@ public:
         // The lengths are at most 32: summing the bytes of the record never carries over
         const uint64_t before = j ? (((bytes & 0x3F3F3F3F3F3F3F3FULL) * 0x0101010101010101ULL) >> (8 * (j - 1))) & 255 : 0;
         const uint64_t byte = (bytes >> (8 * j)) & 255;
-        return {reinterpret_cast<const uint8_t *>(pdata.data()) + base + before, byte & 63, byte >> 6};
+        const uint64_t len = byte & 63;
+        return {reinterpret_cast<const uint8_t *>(pdata.data()) + base + before, len,
+                len == (padded_start[b + 1] - padded_start[b]) / 8 ? BITMAP : byte >> 6};
     }
 
     // Builds the structure from n_sets color sets; get_set(i) returns the words of set i
@@ -473,7 +480,7 @@ public:
         // The partial sets and their records
         const uint64_t n_records = (n_partials + PART_GROUP - 1) / PART_GROUP;
         std::vector<uint8_t> data, records(n_records * RECORD_BYTES, 0);
-        std::vector<uint64_t> forms(3, 0);
+        std::vector<uint64_t> forms(5, 0);
         for (uint64_t b = 0; b < n_blocks; b++)
         {
             const uint64_t size = sizes[b], bb = bitmap_bytes(size);
@@ -493,23 +500,43 @@ public:
                 for (uint64_t w : k)
                     m += __builtin_popcountll(w);
                 const uint64_t before = data.size();
-                uint64_t form;
-                if (m < bb || size - m < bb)
+                // The smallest of the five forms (a bitmap takes bb bytes, at most 32)
+                std::vector<uint32_t> present, absent;
+                for (uint64_t off = 0; off < size; off++)
+                    (((k[off / 64] >> (off % 64)) & 1) ? present : absent).push_back((uint32_t)off);
+                auto runs = [](const std::vector<uint32_t> &pos)
                 {
-                    const bool absent = m >= bb;
-                    form = absent ? ABSENT : LIST;
-                    for (uint64_t off = 0; off < size; off++)
-                        if ((((k[off / 64] >> (off % 64)) & 1) != 0) != absent)
-                            data.push_back((uint8_t)off);
+                    std::vector<uint8_t> r;
+                    for (uint64_t i = 0; i < pos.size(); i++)
+                        if (i == 0 || pos[i] != pos[i - 1] + 1)
+                            r.push_back((uint8_t)pos[i]), r.push_back((uint8_t)pos[i]);
+                        else
+                            r.back() = (uint8_t)pos[i];
+                    return r;
+                };
+                const std::vector<uint8_t> present_runs = runs(present), absent_runs = runs(absent);
+                uint64_t form = BITMAP, best = bb;
+                if (present.size() < best)
+                    form = LIST, best = present.size();
+                if (absent.size() < best)
+                    form = ABSENT, best = absent.size();
+                if (present_runs.size() < best)
+                    form = RUNS, best = present_runs.size();
+                if (absent_runs.size() < best)
+                    form = ABSENT_RUNS, best = absent_runs.size();
+                if (form == LIST || form == ABSENT)
+                    for (uint32_t off : form == LIST ? present : absent)
+                        data.push_back((uint8_t)off);
+                else if (form == RUNS || form == ABSENT_RUNS)
+                {
+                    const std::vector<uint8_t> &r = form == RUNS ? present_runs : absent_runs;
+                    data.insert(data.end(), r.begin(), r.end());
                 }
                 else
-                {
-                    form = BITMAP;
                     for (uint64_t j = 0; j < bb; j++)
                         data.push_back((uint8_t)(k[j / 8] >> (8 * (j % 8))));
-                }
                 forms[form]++;
-                rec[4 + g % PART_GROUP] = (uint8_t)((data.size() - before) | (form << 6));
+                rec[4 + g % PART_GROUP] = (uint8_t)((data.size() - before) | ((form == BITMAP ? LIST : form) << 6));
             }
         }
         for (int i = 0; i < 8; i++)
@@ -521,8 +548,8 @@ public:
         std::memcpy(&pdata[0], data.data(), data.size());
         std::cerr << "Meta-colors: " << n_blocks << " blocks of " << *std::min_element(sizes.begin(), sizes.end()) << "-"
                   << *std::max_element(sizes.begin(), sizes.end()) << " colors, " << n_partials << " distinct partial sets ("
-                  << (data.size() + records.size()) / 1e6 << " MB: " << forms[LIST] << " lists, " << forms[ABSENT] << " lists of absent colors, "
-                  << forms[BITMAP] << " bitmaps), " << (n_sets ? (double)row_bits / (double)n_sets : 0.0) << " bits per color set ("
+                  << (data.size() + records.size()) / 1e6 << " MB: " << forms[LIST] << " lists, " << forms[ABSENT] << " lists of absent colors, " << forms[RUNS]
+                  << " as runs, " << forms[ABSENT_RUNS] << " as runs of absent colors, " << forms[BITMAP] << " bitmaps), " << (n_sets ? (double)row_bits / (double)n_sets : 0.0) << " bits per color set ("
                   << (row_bytes + row_base.size_in_bytes() + row_rel.size_in_bytes()) / 1e6 << " MB with offsets)" << std::endl;
     }
 
@@ -631,7 +658,7 @@ public:
 // color sets are mapped to their partial sets, and each distinct partial set is added once,
 // with the number of finimizers that have it as its weight. Rows and partial sets are fetched
 // in stages, with prefetches, so that their memory latencies overlap. Lists add to the counts
-// one color at a time; bitmaps are added eight positions at a time through 8-bit lanes (as in
+// one color at a time; runs and bitmaps are added eight positions at a time through 8-bit lanes (as in
 // ColorCounter), in the padded order of the blocks, and the lanes are emptied into the counts
 // before any can exceed 255.
 class MetaColorCounter
@@ -694,34 +721,63 @@ private:
             lane[j] += BIT_EXPAND[ptr[j]] * weight;
     }
 
+    // Adds weight (at most 255) to the lanes of positions [from, to) of block b
+    void add_run(const MetaColorSets &M, uint64_t b, uint64_t from, uint64_t to, uint64_t weight)
+    {
+        constexpr uint64_t ONES = 0x0101010101010101ULL;
+        uint64_t *lane = lanes.data() + M.padded_start[b] / 8;
+        while (from < to)
+        {
+            const uint64_t off = from % 8, take = std::min<uint64_t>(8 - off, to - from);
+            const uint64_t m = take == 8 ? ONES : ONES & ((uint64_t(1) << (8 * take)) - 1);
+            lane[from / 8] += (m << (8 * off)) * weight;
+            from += take;
+        }
+    }
+
     void add_partial(const MetaColorSets &M, uint64_t b, const MetaColorSets::Partial &part, uint64_t weight)
     {
-        if (part.form != MetaColorSets::BITMAP)
+        if (part.form == MetaColorSets::LIST || part.form == MetaColorSets::ABSENT)
         {
             const uint16_t *ord = M.order.data() + M.block_start[b];
-            const int32_t w = (int32_t)weight;
-            if (part.form == MetaColorSets::LIST)
-                for (uint64_t j = 0; j < part.len; j++)
-                    counts[ord[part.ptr[j]]] += w;
-            else
-            {
-                for (uint64_t j = 0; j < part.len; j++)
-                    counts[ord[part.ptr[j]]] -= w;
+            int32_t *c = counts.data();
+            const int32_t w = (int32_t)(part.form == MetaColorSets::LIST ? weight : -weight);
+            for (uint64_t j = 0; j < part.len; j++)
+                c[ord[part.ptr[j]]] += w;
+            if (part.form == MetaColorSets::ABSENT)
                 everywhere[b] += weight;
-            }
             return;
         }
+        // Runs and bitmaps go to the lanes, runs of absent colors as the runs between them
+        auto add = [&](uint64_t wt)
+        {
+            if (part.form == MetaColorSets::BITMAP)
+                add_bitmap_bytes(M, b, part.ptr, part.len, wt);
+            else if (part.form == MetaColorSets::RUNS)
+                for (uint64_t j = 0; j < part.len; j += 2)
+                    add_run(M, b, part.ptr[j], part.ptr[j + 1] + 1, wt);
+            else
+            {
+                uint64_t from = 0;
+                for (uint64_t j = 0; j < part.len; j += 2)
+                {
+                    add_run(M, b, from, part.ptr[j], wt);
+                    from = part.ptr[j + 1] + 1;
+                }
+                add_run(M, b, from, M.block_size(b), wt);
+            }
+        };
         if (weight > 255)
         {
             flush(M, b, 1);
-            add_bitmap_bytes(M, b, part.ptr, part.len, 1);
+            add(1);
             pending[b] = 1;
             flush(M, b, (int32_t)weight);
             return;
         }
         if (pending[b] + weight > 255)
             flush(M, b, 1);
-        add_bitmap_bytes(M, b, part.ptr, part.len, weight);
+        add(weight);
         pending[b] += (uint32_t)weight;
     }
 
@@ -827,7 +883,7 @@ public:
             __builtin_prefetch(M.partial_record(t.g));
         for (Todo &t : todo)
         {
-            t.part = M.partial(t.g);
+            t.part = M.partial(t.g, t.block);
             __builtin_prefetch(t.part.ptr);
         }
         for (const Todo &t : todo)
