@@ -10,8 +10,7 @@
 #   FM_CFM        the stage 1 output to build from (required)
 #   FM_QUERIES    directory of query files *.fna (required)
 #   FM_REF_OUT    directory with reference results, NAME.txt (required)
-#   FM_FORMATS    formats to compare (default "1 2"); "4x" is format 4 with fixed rows
-#                 (--meta-rows fixed)
+#   FM_FORMATS    formats to compare (default "1 2")
 #   FM_X          -x for every index (default 16)
 #   FM_P          prefix length (default 10)     FM_K   k (default 31)
 #   FM_OUT        output directory (default: the current directory)
@@ -44,9 +43,7 @@ done
 for F in $FORMATS; do
     echo "=== building format $F with -x $X"
     mkdir -p "$OUT/f$F"
-    META_ROWS=""
-    [ "${F%x}" != "$F" ] && META_ROWS=fixed
-    (cd "$OUT/f$F" && FM_CFM=$CFM FM_X=$X FM_FORMAT=${F%x} FM_META_ROWS=$META_ROWS FM_OUT=$OUT/f$F bash "$REPO/dev/stage2.sh") > "$OUT/f$F.build.out" 2>&1 \
+    (cd "$OUT/f$F" && FM_CFM=$CFM FM_X=$X FM_FORMAT=$F FM_OUT=$OUT/f$F bash "$REPO/dev/stage2.sh") > "$OUT/f$F.build.out" 2>&1 \
         || { echo "FM_ERROR build failed for format $F:"; tail -n 20 "$OUT/f$F.build.out"; exit 1; }
     grep -E '^(wall_s|peak_rss_gb)|n_short_fmin' "$OUT/f$F.build.out" | tr '\n' ' '; echo
 done

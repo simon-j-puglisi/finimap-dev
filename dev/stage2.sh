@@ -11,7 +11,6 @@
 #   FM_REF_FMIN  reference .fmin to compare with (optional)
 #   FM_K, FM_P, FM_X   k, prefix length, short/long threshold (defaults 31, 10, 18)
 #   FM_FORMAT    index format to write (--index-format; default: that of build-fmin)
-#   FM_META_ROWS row layout of format 4 (--meta-rows; default: that of build-fmin)
 #   FM_CMAKE_MODULE    module providing cmake (default CMake/4.2.1; "none" to skip)
 #   FM_GCC_MODULE      compiler module to load first (default none)
 #   FM_KEEP      set to 1 to keep the .fmin even when it equals the reference
@@ -24,12 +23,11 @@ OUT=$(readlink -f "${FM_OUT:-$PWD}")
 K=${FM_K:-31}; P=${FM_P:-10}; X=${FM_X:-18}
 REF_FMIN=${FM_REF_FMIN:-}
 FORMAT=${FM_FORMAT:-}
-META_ROWS=${FM_META_ROWS:-}
 JOBS=${SLURM_CPUS_PER_TASK:-4}
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
 
 echo "FM_STAGE2 start host=$(hostname) date=$(date '+%F %T')"
-echo "repo=$REPO commit=$COMMIT cfm=$CFM out=$OUT k=$K p=$P x=$X format=${FORMAT:-default}${META_ROWS:+ meta_rows=$META_ROWS} ref_fmin=${REF_FMIN:-none}"
+echo "repo=$REPO commit=$COMMIT cfm=$CFM out=$OUT k=$K p=$P x=$X format=${FORMAT:-default} ref_fmin=${REF_FMIN:-none}"
 [ -e "$REPO/dev/timeit.py" ] || { echo "FM_ERROR repo not found at $REPO"; exit 1; }
 [ -s "$CFM" ] || { echo "FM_ERROR cfm not found: $CFM"; exit 1; }
 mkdir -p "$OUT"
@@ -44,8 +42,8 @@ if [ -s "$OUT/stage2.time.txt" ] && grep -q '^exit_code 0$' "$OUT/stage2.time.tx
 else
     rm -f "$OUT/idx.fmin"
     python3 "$REPO/dev/timeit.py" "$OUT/stage2.time.part" bash -c \
-        'set -o pipefail; "$1" build-fmin -i "$2" -o "$3" -k "$4" -p "$5" -x "$6" ${9:+--index-format "$9"} ${10:+--meta-rows "${10}"} 2>&1 | python3 "$7" > "$8"' \
-        _ "$OUT/finimap" "$CFM" "$OUT/idx" "$K" "$P" "$X" "$REPO/dev/stamp.py" "$OUT/stage2.log" "$FORMAT" "$META_ROWS" \
+        'set -o pipefail; "$1" build-fmin -i "$2" -o "$3" -k "$4" -p "$5" -x "$6" ${9:+--index-format "$9"} 2>&1 | python3 "$7" > "$8"' \
+        _ "$OUT/finimap" "$CFM" "$OUT/idx" "$K" "$P" "$X" "$REPO/dev/stamp.py" "$OUT/stage2.log" "$FORMAT" \
         || { echo "FM_ERROR build-fmin failed; end of its log:"; tail -n 20 "$OUT/stage2.log"; exit 1; }
     mv "$OUT/stage2.time.part" "$OUT/stage2.time.txt"
 fi

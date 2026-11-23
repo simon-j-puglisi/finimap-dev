@@ -175,10 +175,10 @@ cd ..
   clustering tree. Each block stores its distinct partial sets once, as a list of the colors
   it has, a list of those it lacks, or a bitmap, and has a default: its most common partial
   set. Each color set is a row: a bitmask of the blocks where its partial set is not the
-  default, then the ids of those partial sets. Queries add each distinct partial set of a read
-  once, with the number of the read's finimizers that use it. Estimates on four species
-  (`dev/colorsets/cs_analyze.cpp`) put the color sets at 5 to 10 times smaller than in
-  format 3.
+  default, then the ids of those partial sets in a canonical Huffman code of each block.
+  Queries add each distinct partial set of a read once, with the number of the read's
+  finimizers that use it. Format 4 also stores the long finimizers in 67 - 2p bits each
+  instead of 64 (47 at the default `-p 10`).
 - **Format 3** (the default) is format 2 with three arrays packed in as many bits as their
   values need: the color set id of each finimizer (23 bits instead of 64 for 3,498 *E. coli*
   genomes), the colors of the listed color sets (12 bits instead of 16 below 4,096 colors), and

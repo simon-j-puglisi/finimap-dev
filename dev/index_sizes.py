@@ -28,21 +28,18 @@ def report(prefix):
         sparse_count = dense_count = bits = 0
         meta = None
         if fmt >= 4:
-            mc_colors, mc_sets, mc_blocks, mc_layout, mc_row_bits, mc_partials = [u64(f) for _ in range(6)]
-            skip("color sets: meta-color layout (color order, blocks)", mc_colors * 2 + (4 * mc_blocks + 2) * 8)
-            po_n, po_bits, po_bytes = u64(f), u64(f), u64(f)
-            skip("color sets: partial set offsets", po_bytes, "%d bits each" % po_bits)
-            pk_n, pk_bits, pk_bytes = u64(f), u64(f), u64(f)
-            skip("color sets: partial set kinds", pk_bytes)
+            mc_colors, mc_sets, mc_blocks, mc_row_bits, mc_partials = [u64(f) for _ in range(5)]
+            skip("color sets: meta-color layout (color order, blocks, codes)", mc_colors * 2 + (37 * mc_blocks + 2) * 8)
+            rec = u64(f)
+            skip("color sets: partial set records (offsets, lengths, forms)", rec)
             pd = u64(f)
             skip("color sets: partial sets", pd, "%d distinct partial sets in %d blocks" % (mc_partials, mc_blocks))
-            ro_n, ro_bits, ro_bytes = u64(f), u64(f), u64(f)
-            skip("color sets: row offsets", ro_bytes, "%d bits each" % ro_bits)
+            rb_n, rb_bits, rb_bytes = u64(f), u64(f), u64(f)
+            skip("color sets: row offsets, every 16th row", rb_bytes, "%d bits each" % rb_bits)
+            rr_n, rr_bits, rr_bytes = u64(f), u64(f), u64(f)
+            skip("color sets: row offsets within groups of 16", rr_bytes, "%d bits each" % rr_bits)
             rows = u64(f)
-            if mc_layout == 0:
-                skip("color sets: rows (blocks off the default, their partial set ids)", rows, "%d color sets, %.1f bits each on average" % (mc_sets, mc_row_bits / max(1, mc_sets)))
-            else:
-                skip("color sets: rows (a partial set id for every block)", rows, "%d color sets, %d bits each" % (mc_sets, mc_row_bits // max(1, mc_sets)))
+            skip("color sets: rows (blocks off the default, Huffman-coded partial set ids)", rows, "%d color sets, %.1f bits each on average" % (mc_sets, mc_row_bits / max(1, mc_sets)))
             meta = (mc_sets, mc_blocks, mc_partials)
         else:
             sparse_count, dense_count = u64(f), u64(f)
@@ -84,7 +81,11 @@ def report(prefix):
             skip("short finimizers: lengths", f8_n)
         preflen, nprefs, nfins = u64(f), u64(f), u64(f)
         skip("long finimizers: prefix table (size set by -p)", (nprefs + 1) * 4, "%d prefixes of length %d" % (nprefs, preflen))
-        skip("long finimizers: keys", nfins * 8, "%d long finimizers" % nfins)
+        if fmt >= 4 and 5 <= preflen <= 30:
+            k_n, k_bits, k_bytes = u64(f), u64(f), u64(f)
+            skip("long finimizers: keys", k_bytes, "%d long finimizers, %d bits each" % (nfins, k_bits))
+        else:
+            skip("long finimizers: keys", nfins * 8, "%d long finimizers" % nfins)
         n_colors, n_finimizers, k = u64(f), u64(f), u64(f)
         end = f.tell()
     accounted = sum(p[1] for p in parts)

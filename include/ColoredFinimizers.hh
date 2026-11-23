@@ -567,7 +567,7 @@ public:
         }
 
         f8.serialize(out, format);
-        pt.serialize(out);
+        pt.serialize(out, format);
 
         // metadata
         out.write(reinterpret_cast<const char *>(&n_colors), sizeof(n_colors));
@@ -647,7 +647,7 @@ public:
             cerr << "color_set_ids_size: " << loaded_color_set_ids.size() << " (" << loaded_color_set_ids.bits() << " bits each)" << endl;
 
             f8.load(in, format);
-            pt.load(in);
+            pt.load(in, format);
 
             // metadata
             in.read(reinterpret_cast<char *>(&n_colors), sizeof(n_colors));

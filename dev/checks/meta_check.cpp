@@ -1,6 +1,6 @@
 // Checks MetaColorSets and MetaColorCounter against direct counting, on random color sets of
 // many shapes: sparse, dense, nearly full, clustered, with few and many colors, and with
-// finimizer multisets whose weights pass 255, in both row layouts. Also checks that the structure survives
+// finimizer multisets whose weights pass 255. Also checks that the structure survives
 // serialization.
 // Build from the repository root:
 //   g++ -std=c++2a -O2 -march=native -fopenmp -I include -I SDSL/include -o dev/checks/meta_check dev/checks/meta_check.cpp -L SDSL/lib -lsdsl
@@ -19,7 +19,7 @@ static uint64_t rnd(uint64_t n) { return n ? rng() % n : 0; }
 int main(int argc, char **argv)
 {
     const int rounds = argc > 1 ? std::atoi(argv[1]) : 40;
-    uint64_t failures = 0, kinds[3] = {0, 0, 0}, nonempty_defaults = 0, max_blocks = 0;
+    uint64_t failures = 0, kinds[3] = {0, 0, 0}, nonempty_defaults = 0, max_blocks = 0, max_code = 0;
     for (int r = 0; r < rounds; r++)
     {
         // The last round has more colors than are clustered, and more than 56 blocks
@@ -52,7 +52,6 @@ int main(int argc, char **argv)
                     words[i * W + c / 64] |= uint64_t(1) << (c % 64);
             }
         }
-        MetaColorSets::build_layout = r % 2 ? MetaColorSets::FIXED : MetaColorSets::MASK;
         MetaColorSets built;
         built.build(n_sets, C, [&](uint64_t i)
                     { return (const uint64_t *)words.data() + i * W; });
@@ -61,10 +60,14 @@ int main(int argc, char **argv)
         MetaColorSets M;
         M.load(ss);
         for (uint64_t g = 0; g < M.n_partials; g++)
-            kinds[M.pkind[g]]++;
+            kinds[M.partial(g).form]++;
         for (uint64_t b = 0; b < M.n_blocks; b++)
-            nonempty_defaults += M.defaults[b] != 0;
+            nonempty_defaults += M.defaults[b] != M.empty_id[b];
         max_blocks = std::max(max_blocks, M.n_blocks);
+        for (uint64_t b = 0; b < M.n_blocks; b++)
+            for (uint64_t l = 1; l <= MetaColorSets::MAX_CODE; l++)
+                if (M.code_count[b * (MetaColorSets::MAX_CODE + 1) + l])
+                    max_code = std::max<uint64_t>(max_code, l);
         MetaColorCounter counter;
         for (int q = 0; q < 30; q++)
         {
@@ -96,6 +99,6 @@ int main(int argc, char **argv)
         }
     }
     std::cout << "MetaColorSets counting against direct counting: " << (failures ? "FAILED" : "ok") << " (partial sets stored as lists " << kinds[0]
-              << ", as lists of absent colors " << kinds[1] << ", as bitmaps " << kinds[2] << "; " << nonempty_defaults << " blocks with a nonempty default; up to " << max_blocks << " blocks)\n";
+              << ", as lists of absent colors " << kinds[1] << ", as bitmaps " << kinds[2] << "; " << nonempty_defaults << " blocks with a nonempty default; up to " << max_blocks << " blocks; codes up to " << max_code << " bits)\n";
     return failures ? 1 : 0;
 }
