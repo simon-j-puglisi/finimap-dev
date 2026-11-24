@@ -149,7 +149,7 @@ cd ..
 | `-p, --p_len` | INT | 10 | Finimizer prefix length (bits used for bucketing). Higher values → more buckets → faster but larger index |
 | `-x` | INT | 16 | Short/long finimizer threshold, in characters (1 to 19). Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
-| `-m, --meta` | BOOL | false | Set to `true` for metagenomic indexes (multiple reference genomes) |
+| `-m, --meta` | flag | off | Metagenome mode: for a `.cfm` built by stage 1 with `--sparse` (color sets stored as lists). Required for such a file and refused for a dense one |
 | `--index-format` | INT | 3 | Index format to write. 4 stores the color sets as meta-color sets, several times smaller (experimental); 1 and 2 are the formats of earlier versions of Finimap, kept for comparison. `search-fmin` reads all four |
 | `-h, --help` | - | - | Display help message |
 

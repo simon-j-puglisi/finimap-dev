@@ -72,6 +72,7 @@ public:
     };
     
     VecConcat sparse_colors;  // Sparse color representation (when meta=true)
+    bool sparse = false;      // whether the file stored the color sets sparsely (stage 1 --sparse)
 
     VecConcat load_sparse_colors(std::istream& file) {
         // uint8_t is_sparse;
@@ -123,6 +124,7 @@ public:
         uint8_t is_sparse;
         in.read(reinterpret_cast<char *>(&is_sparse), 1);
         //cerr << (int)is_sparse << endl;
+        sparse = is_sparse == 1;
         if (is_sparse == 1) {
             cerr << "meta" << endl;
             sparse_colors = load_sparse_colors(in);
@@ -230,6 +232,10 @@ public:
         n_finimizers = cf.lengths.size();
         cerr << "total finimizers: " << (int)n_finimizers << endl;
         true_or_crash(n_finimizers > 0, "ERROR: 0 finimizers");
+        if (meta && !cf.sparse)
+            throw std::runtime_error("-m (metagenome) needs a .cfm built by stage 1 with --sparse, and this one is dense; leave out -m");
+        if (!meta && cf.sparse)
+            throw std::runtime_error("This .cfm was built by stage 1 with --sparse: build the index with -m");
 
         if (meta) {
             // Sparse deduplication
