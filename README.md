@@ -45,7 +45,7 @@ If you forgot the flag `--recursive`, pull the submodules with:
 git submodule update --init --recursive
 ```
 
-Build the [finimizer_matrix](https://github.com/simon-j-puglisi/finimizer_matrix/tree/low-memory-build) submodule (a low-memory version of [jnalanko/finimizer_matrix](https://github.com/jnalanko/finimizer_matrix); see its README):
+Build finimizer_matrix, the program for stage 1, in the folder `finimizer_matrix` (see its README):
 ```bash
 cd finimizer_matrix
 cargo build -r

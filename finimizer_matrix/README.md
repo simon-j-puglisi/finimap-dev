@@ -1,10 +1,10 @@
 # finimizer_matrix
 
-Computes the colored finimizers of a collection of genomes and writes them to disk. This is stage 1 of building a [Finimap](https://github.com/simon-j-puglisi/finimap-dev) index; Finimap's `build-fmin` turns the output (a `.cfm` file) into a queryable index.
+Computes the colored finimizers of a collection of genomes and writes them to disk. This is stage 1 of building a [Finimap](https://github.com/ElenaBiagi/Finimap) index; Finimap's `build-fmin` turns the output (a `.cfm` file) into a queryable index.
 
 For each input file (one color), it finds the shortest unique finimizer of every k-mer with respect to the SBWT of the whole collection, and records which colors each finimizer occurs in.
 
-This fork (branch `low-memory-build`) is based on `master_tlen_sparse` of [jnalanko/finimizer_matrix](https://github.com/jnalanko/finimizer_matrix). It writes the same `.cfm` files with much less memory and time:
+It was developed in [jnalanko/finimizer_matrix](https://github.com/jnalanko/finimizer_matrix) and is now part of the Finimap repository, with its history. Compared with branch `master_tlen_sparse` there, the version Finimap used before, it writes the same `.cfm` files with much less memory and time:
 
 - Each color keeps only a sorted, gap-encoded list of the SBWT positions of its finimizers, instead of a bit vector over all k-mers of the collection, and the finimizers × colors matrix is filled from these lists at the end. Input files are loaded one at a time instead of all being held in memory.
 - The finimizer of each k-mer is picked with a sliding-window minimum.
