@@ -150,7 +150,7 @@ cd ..
 | `-x` | INT | 16 | Short/long finimizer threshold, in characters (1 to 19). Finimizers of at most this length are stored in one structure, longer ones in another. It sets the layout of the index, not the results |
 | `-k` | INT | 31 | K-mer length (must match the value used in Stage 1) |
 | `-m, --meta` | flag | off | Metagenome mode: for a `.cfm` built by stage 1 with `--sparse` (color sets stored as lists). Required for such a file and refused for a dense one |
-| `--index-format` | INT | 3 | Index format to write. 4 stores the color sets as meta-color sets, several times smaller (experimental); 1 and 2 are the formats of earlier versions of Finimap, kept for comparison. `search-fmin` reads all four |
+| `--index-format` | INT | 4 | Index format to write. 4 stores the color sets as meta-color sets, several times smaller than format 3; 1 to 3 are the formats of earlier versions, kept for comparison. All give the same results, and `search-fmin` reads all four |
 | `-h, --help` | - | - | Display help message |
 
 #### Parameter Tuning
@@ -168,7 +168,7 @@ cd ..
 
 #### Index formats
 
-- **Format 4** (experimental, `--index-format 4`) is format 3 with the color sets stored as
+- **Format 4** (the default) is format 3 with the color sets stored as
   meta-color sets (`include/MetaColorSets.hh`). The colors are ordered by average-linkage
   clustering of how they co-occur in the color sets (on a sample of 65,536 sets; above 16,384
   colors the input order is kept), and split into blocks of at most 256 colors that follow the
@@ -179,8 +179,12 @@ cd ..
   default, then the ids of those partial sets in a canonical Huffman code of each block.
   Queries add each distinct partial set of a read once, with the number of the read's
   finimizers that use it. Format 4 also stores the long finimizers in 67 - 2p bits rounded
-  up to whole bytes instead of 64 (48 at the default `-p 10`).
-- **Format 3** (the default) is format 2 with three arrays packed in as many bits as their
+  up to whole bytes instead of 64 (48 at the default `-p 10`). On 3,498 *E. coli* genomes
+  (`-x 16`) the index takes 468 MB, against 1.55 GB in format 3; on 9,500 genomes each of
+  *Salmonella*, *S. aureus* and *S. pneumoniae*, 411, 220 and 223 MB, against 2.60, 1.83 and
+  1.06 GB. Query results are the same; queries take from about the same time to a third
+  longer (more where the color sets vary more), and the index loads several times faster.
+- **Format 3** (the default before format 4) is format 2 with three arrays packed in as many bits as their
   values need: the color set id of each finimizer (23 bits instead of 64 for 3,498 *E. coli*
   genomes), the colors of the listed color sets (12 bits instead of 16 below 4,096 colors), and
   the lengths of the short finimizers (4 bits instead of 8 at `-x 16`).
@@ -190,7 +194,7 @@ cd ..
   and later start with the signature `FINIMAP!` and the format number.
 - **Format 1** is the format of earlier versions, with a 32-bit pointer per bucket (4^x / 64
   bytes). It has no signature.
-- `build-fmin --index-format 1` or `2` still writes those formats, byte for byte as before.
+- `build-fmin --index-format 1`, `2` or `3` still writes those formats, byte for byte as before.
   All four give the same results. `dev/index_sizes.py` reports the size of each part of any
   of them.
 

@@ -54,7 +54,7 @@ constexpr char INDEX_SIGNATURE[8] = {'F', 'I', 'N', 'I', 'M', 'A', 'P', '!'};
 // 1: short finimizers in Pred8v2; 2: in Pino; 3: also the color set ids, the lists of colors and
 // the lengths of the short finimizers packed in as many bits as they need; 4: also the color
 // sets stored as meta-color sets (MetaColorSets.hh)
-constexpr uint64_t INDEX_FORMAT = 3;     // the format written by default
+constexpr uint64_t INDEX_FORMAT = 4;     // the format written by default
 constexpr uint64_t MAX_INDEX_FORMAT = 4; // the newest format, which can be written and read
 
 // Colored finimizers without much compression
