@@ -33,11 +33,12 @@ Let $G$ be the de Bruijn graph of a set of $k$-mers $R$, $t \geq 1$ be an intege
 
 First clone the repository and access it with:
 ```bash
-git clone --recursive -b robust-query https://github.com/simon-j-puglisi/finimap-dev.git
-cd finimap-dev
+git clone --recursive https://github.com/ElenaBiagi/Finimap.git
+cd Finimap
 ```
 
-This is the development version of [ElenaBiagi/Finimap](https://github.com/ElenaBiagi/Finimap), on the branch `robust-query`.
+The version described in the WABI 2026 paper is tagged `wabi2026`. This version still reads
+its indexes (format 1); see "Index formats" below.
 
 If you forgot the flag `--recursive`, pull the submodules with:
 ```bash
