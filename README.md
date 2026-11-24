@@ -380,7 +380,7 @@ filter with the exact set.
 
 - **Alphabet**: The code works with DNA sequences: {A, C, G, T} (case-insensitive)
 - **Reverse complement**: Use `--reverse` flag in `finimizer_matrix build` to index both forward and reverse complement strands
-- **Metagenomic data**: Use `--meta true` in `build-fmin` for collections of multiple genomes
+- **Metagenomic data**: Build stage 1 with `--sparse` and stage 2 with `-m`
 - **Large databases**: For very large reference collections (>100GB), consider:
   - Using higher `-p` values for faster queries
   - Using the sparse representation
